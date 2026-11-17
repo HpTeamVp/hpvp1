@@ -1,0 +1,754 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local lp = Players.LocalPlayer
+
+local NORMAL_SPEED = 16
+local AURA_TIMEOUT = 5
+
+local State = {
+	KillAura = false,
+	AirJump = false, Speed = false, Noclip = false,
+	Line = false, Box = false, Health = false,
+	SpeedValue = 80,
+	AuraRange = 150,
+	AutoFarm = false,
+	AutoChest = false,
+	AutoEat = false,
+	GodMode = false,
+}
+
+-- ===== GUI =====
+local gui = Instance.new("ScreenGui")
+gui.Name = "HpTeamPro"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = lp:WaitForChild("PlayerGui")
+
+local espLayer = Instance.new("Frame")
+espLayer.Name = "ESP"
+espLayer.Size = UDim2.fromScale(1, 1)
+espLayer.BackgroundTransparency = 1
+espLayer.BorderSizePixel = 0
+espLayer.ClipsDescendants = true
+espLayer.ZIndex = 1
+espLayer.Parent = gui
+
+local main = Instance.new("Frame")
+main.Name = "Menu"
+main.Size = UDim2.fromOffset(190, 0)
+main.AutomaticSize = Enum.AutomaticSize.Y
+main.Position = UDim2.fromOffset(8, 70)
+main.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+main.BorderSizePixel = 0
+main.ZIndex = 10
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+
+local scale = Instance.new("UIScale")
+scale.Parent = main
+
+local mainLayout = Instance.new("UIListLayout")
+mainLayout.Padding = UDim.new(0, 4)
+mainLayout.SortOrder = Enum.SortOrder.LayoutOrder
+mainLayout.Parent = main
+
+local title = Instance.new("Frame")
+title.Size = UDim2.new(1, 0, 0, 32)
+title.BackgroundColor3 = Color3.fromRGB(40, 90, 200)
+title.BorderSizePixel = 0
+title.LayoutOrder = 0
+title.ZIndex = 11
+title.Parent = main
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+
+local titleText = Instance.new("TextLabel")
+titleText.Size = UDim2.new(1, -70, 1, 0)
+titleText.Position = UDim2.fromOffset(8, 0)
+titleText.BackgroundTransparency = 1
+titleText.Text = "Hp Team Pro V1"
+titleText.Font = Enum.Font.GothamBold
+titleText.TextSize = 14
+titleText.TextColor3 = Color3.new(1, 1, 1)
+titleText.TextXAlignment = Enum.TextXAlignment.Left
+titleText.ZIndex = 12
+titleText.Parent = title
+
+local function titleButton(text, x)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.fromOffset(28, 24)
+	b.Position = UDim2.new(1, x, 0, 4)
+	b.BackgroundColor3 = Color3.fromRGB(30, 60, 140)
+	b.BorderSizePixel = 0
+	b.Text = text
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 14
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.ZIndex = 12
+	b.Parent = title
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+	return b
+end
+
+local zoomBtn = titleButton("+", -64)
+local foldBtn = titleButton("–", -32)
+
+local content = Instance.new("ScrollingFrame")
+content.Size = UDim2.new(1, 0, 0, 250)
+content.CanvasSize = UDim2.new()
+content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+content.ScrollingDirection = Enum.ScrollingDirection.Y
+content.ScrollBarThickness = 4
+content.ScrollBarImageColor3 = Color3.fromRGB(120, 140, 220)
+content.BackgroundTransparency = 1
+content.BorderSizePixel = 0
+content.LayoutOrder = 1
+content.ZIndex = 11
+content.Parent = main
+
+local contentLayout = Instance.new("UIListLayout")
+contentLayout.Padding = UDim.new(0, 4)
+contentLayout.Parent = content
+
+local pad = Instance.new("UIPadding")
+pad.PaddingLeft = UDim.new(0, 6)
+pad.PaddingRight = UDim.new(0, 8)
+pad.PaddingBottom = UDim.new(0, 6)
+pad.Parent = content
+
+local folded, big = false, false
+foldBtn.Activated:Connect(function()
+	folded = not folded
+	content.Visible = not folded
+	foldBtn.Text = folded and "▢" or "–"
+end)
+zoomBtn.Activated:Connect(function()
+	big = not big
+	scale.Scale = big and 1.35 or 1
+	zoomBtn.Text = big and "×" or "+"
+end)
+
+do
+	local dragging, startInput, startPos
+	title.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging, startInput, startPos = true, i.Position, main.Position
+			i.Changed:Connect(function()
+				if i.UserInputState == Enum.UserInputState.End then dragging = false end
+			end)
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+			local d = i.Position - startInput
+			main.Position = UDim2.fromOffset(startPos.X.Offset + d.X, startPos.Y.Offset + d.Y)
+		end
+	end)
+end
+
+local function addToggle(key, label)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(1, 0, 0, 30)
+	b.Font = Enum.Font.GothamMedium
+	b.TextSize = 14
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.BorderSizePixel = 0
+	b.ZIndex = 12
+	b.Parent = content
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+	local function refresh()
+		b.Text = label .. (State[key] and ": BẬT" or ": TẮT")
+		b.BackgroundColor3 = State[key] and Color3.fromRGB(40, 140, 80) or Color3.fromRGB(60, 60, 68)
+	end
+	b.Activated:Connect(function()
+		State[key] = not State[key]
+		refresh()
+	end)
+	refresh()
+end
+
+local function addInput(label, key, minV, maxV)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 30)
+	row.BackgroundTransparency = 1
+	row.ZIndex = 12
+	row.Parent = content
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0.55, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = label
+	lbl.Font = Enum.Font.Gotham
+	lbl.TextSize = 13
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.ZIndex = 12
+	lbl.Parent = row
+
+	local box = Instance.new("TextBox")
+	box.Size = UDim2.new(0.45, 0, 1, 0)
+	box.Position = UDim2.fromScale(0.55, 0)
+	box.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+	box.BorderSizePixel = 0
+	box.Text = tostring(State[key])
+	box.ClearTextOnFocus = true
+	box.Font = Enum.Font.GothamMedium
+	box.TextSize = 14
+	box.TextColor3 = Color3.new(1, 1, 1)
+	box.ZIndex = 12
+	box.Parent = row
+	Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+
+	box.FocusLost:Connect(function()
+		local n = tonumber(box.Text)
+		if n then State[key] = math.clamp(n, minV, maxV) end
+		box.Text = tostring(State[key])
+	end)
+end
+
+-- Kill Aura nằm trên cùng
+addToggle("KillAura", "Kill Aura")
+addInput("Tầm quét:", "AuraRange", 10, 1000)
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, 0, 0, 20)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Mob tìm thấy: 0"
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 12
+statusLabel.TextColor3 = Color3.fromRGB(170, 190, 255)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.ZIndex = 12
+statusLabel.Parent = content
+
+addToggle("AirJump", "Nhảy trên không")
+addToggle("Speed", "Tốc độ")
+addInput("Số tốc độ:", "SpeedValue", 1, 500)
+addToggle("Noclip", "Xuyên vật cản")
+addToggle("Line", "ESP Line")
+addToggle("Box", "ESP Box")
+addToggle("Health", "ESP Máu")
+
+-- ===== Chức năng mới: Auto Farm / Chest / Eat / GodMode =====
+addToggle("AutoFarm", "Auto Farm")
+addToggle("AutoChest", "Auto Chest")
+addToggle("AutoEat", "Auto Eat")
+addToggle("GodMode", "God Mode")
+-- ===== Nhân vật =====
+local function getChar()
+	local c = lp.Character
+	if not c then return end
+	local hum = c:FindFirstChildOfClass("Humanoid")
+	local root = c:FindFirstChild("HumanoidRootPart")
+	if hum and root then return c, hum, root end
+end
+
+local function standOffsetOf(hum, root)
+	if hum.RigType == Enum.HumanoidRigType.R6 then return 3 end
+	return hum.HipHeight + root.Size.Y / 2
+end
+
+UIS.JumpRequest:Connect(function()
+	if not State.AirJump then return end
+	local _, hum = getChar()
+	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.RespectCanCollide = true
+local baseExclude = {}
+
+local function applyExclude()
+	local list = table.clone(baseExclude)
+	if lp.Character then table.insert(list, lp.Character) end
+	rayParams.FilterDescendantsInstances = list
+end
+
+local function findGround(x, z, fromY)
+	local r = Workspace:Raycast(Vector3.new(x, fromY, z), Vector3.new(0, -400, 0), rayParams)
+	return r and r.Position.Y
+end
+
+local SOLID = { Head = true, Torso = true, UpperTorso = true, LowerTorso = true, HumanoidRootPart = true }
+local lastChar, wasNoclip = nil, false
+local killing = false
+
+RunService.Heartbeat:Connect(function()
+	local char, hum, root = getChar()
+	if not char then return end
+
+	if char ~= lastChar then
+		lastChar, wasNoclip = char, false
+		applyExclude()
+	end
+
+	hum.WalkSpeed = State.Speed and State.SpeedValue or NORMAL_SPEED
+
+	if State.Noclip and not killing then
+		local p = root.Position
+		local offset = standOffsetOf(hum, root)
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") then part.CanCollide = false end
+		end
+		local g = findGround(p.X, p.Z, p.Y + 3)
+		if g then
+			local standY = g + offset
+			if p.Y < standY - 1 then
+				local v = root.AssemblyLinearVelocity
+				root.CFrame = root.CFrame + Vector3.new(0, standY - p.Y, 0)
+				root.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+			end
+		end
+	elseif wasNoclip and not State.Noclip then
+		for _, part in ipairs(char:GetDescendants()) do
+			if part:IsA("BasePart") and SOLID[part.Name] then part.CanCollide = true end
+		end
+	end
+
+	wasNoclip = State.Noclip
+
+	-- God Mode: ghi đè máu mỗi frame
+	if State.GodMode then
+		if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
+		if char:GetAttribute("Dead") then char:SetAttribute("Dead", false) end
+	end
+end)
+
+-- ===== ESP =====
+local RED = Color3.fromRGB(255, 60, 60)
+local tracked = {}
+local partCache = {}
+
+local function makeEsp(model)
+	local e = {}
+
+	e.line = Instance.new("Frame")
+	e.line.AnchorPoint = Vector2.new(0.5, 0.5)
+	e.line.Size = UDim2.fromOffset(0, 0)
+	e.line.BorderSizePixel = 0
+	e.line.BackgroundColor3 = RED
+	e.line.Visible = false
+	e.line.ZIndex = 2
+
+	e.box = Instance.new("Frame")
+	e.box.Size = UDim2.fromOffset(0, 0)
+	e.box.BackgroundTransparency = 1
+	e.box.BorderSizePixel = 0
+	e.box.Visible = false
+	e.box.ZIndex = 2
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = RED
+	stroke.Thickness = 1.5
+	stroke.Parent = e.box
+
+	e.bar = Instance.new("Frame")
+	e.bar.Size = UDim2.fromOffset(4, 0)
+	e.bar.BackgroundColor3 = Color3.new(0, 0, 0)
+	e.bar.BorderSizePixel = 0
+	e.bar.Visible = false
+	e.bar.ZIndex = 2
+
+	e.fill = Instance.new("Frame")
+	e.fill.Size = UDim2.fromScale(1, 1)
+	e.fill.BorderSizePixel = 0
+	e.fill.AnchorPoint = Vector2.new(0, 1)
+	e.fill.Position = UDim2.fromScale(0, 1)
+	e.fill.ZIndex = 3
+	e.fill.Parent = e.bar
+
+	e.text = Instance.new("TextLabel")
+	e.text.Size = UDim2.fromOffset(160, 14)
+	e.text.BackgroundTransparency = 1
+	e.text.TextColor3 = Color3.new(1, 1, 1)
+	e.text.TextStrokeTransparency = 0.5
+	e.text.Font = Enum.Font.GothamMedium
+	e.text.TextSize = 12
+	e.text.AnchorPoint = Vector2.new(0.5, 1)
+	e.text.Visible = false
+	e.text.ZIndex = 3
+
+	e.line.Parent = espLayer
+	e.box.Parent = espLayer
+	e.bar.Parent = espLayer
+	e.text.Parent = espLayer
+	tracked[model] = e
+end
+
+local function destroyEsp(model)
+	local e = tracked[model]
+	if not e then return end
+	e.line:Destroy(); e.box:Destroy(); e.bar:Destroy(); e.text:Destroy()
+	tracked[model] = nil
+	partCache[model] = nil
+end
+
+local function register(hum)
+	local m = hum.Parent
+	if not m or not m:IsA("Model") or tracked[m] then return end
+	if m == lp.Character or Players:GetPlayerFromCharacter(m) then return end
+	if hum.Health <= 0 then return end
+	makeEsp(m)
+end
+
+Workspace.DescendantAdded:Connect(function(d)
+	if d:IsA("Humanoid") then task.defer(register, d) end
+end)
+
+task.spawn(function()
+	while true do
+		local list, n = {}, 0
+		for _, d in ipairs(Workspace:GetDescendants()) do
+			if d:IsA("Humanoid") then
+				if d.Parent then table.insert(list, d.Parent) end
+				register(d)
+			end
+		end
+		for _ in pairs(tracked) do n += 1 end
+		baseExclude = list
+		applyExclude()
+		statusLabel.Text = "Mob tìm thấy: " .. n
+		task.wait(1.5)
+	end
+end)
+
+local function visibleParts(model)
+	local c = partCache[model]
+	if c and os.clock() - c.t < 1 then return c.list end
+	local list = {}
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") and d.Transparency < 0.9 and not d:FindFirstAncestorOfClass("Tool") then
+			local s = d.Size
+			if math.max(s.X, s.Y, s.Z) <= 20 then table.insert(list, d) end
+		end
+	end
+	partCache[model] = { t = os.clock(), list = list }
+	return list
+end
+
+local function worldBounds(parts)
+	local mn = Vector3.new(math.huge, math.huge, math.huge)
+	local mx = Vector3.new(-math.huge, -math.huge, -math.huge)
+	for _, part in ipairs(parts) do
+		local x, y, z, r00, r01, r02, r10, r11, r12, r20, r21, r22 = part.CFrame:GetComponents()
+		local s = part.Size / 2
+		local ex = math.abs(r00) * s.X + math.abs(r01) * s.Y + math.abs(r02) * s.Z
+		local ey = math.abs(r10) * s.X + math.abs(r11) * s.Y + math.abs(r12) * s.Z
+		local ez = math.abs(r20) * s.X + math.abs(r21) * s.Y + math.abs(r22) * s.Z
+		mn = Vector3.new(math.min(mn.X, x - ex), math.min(mn.Y, y - ey), math.min(mn.Z, z - ez))
+		mx = Vector3.new(math.max(mx.X, x + ex), math.max(mx.Y, y + ey), math.max(mx.Z, z + ez))
+	end
+	return mn, mx
+end
+
+local function project(camCF, world, k, vp)
+	local v = camCF:PointToObjectSpace(world)
+	local behind = v.Z > -0.05
+	local dz = behind and 0.05 or -v.Z
+	local x = vp.X / 2 + (v.X / dz) * k
+	local y = vp.Y / 2 - (v.Y / dz) * k
+	return Vector2.new(math.clamp(x, -vp.X * 2, vp.X * 3), math.clamp(y, -vp.Y * 2, vp.Y * 3)), behind
+end
+
+local function hideEsp(e)
+	e.line.Visible = false
+	e.box.Visible = false
+	e.bar.Visible = false
+	e.text.Visible = false
+end
+
+local function updateOne(model, e, cam, vp, camCF, k)
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not model:IsDescendantOf(Workspace) or not hum or hum.Health <= 0 then
+		destroyEsp(model)
+		return
+	end
+
+	local parts = visibleParts(model)
+	local mn, mx
+	if #parts > 0 then
+		mn, mx = worldBounds(parts)
+	else
+		local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+		if not root then hideEsp(e) return end
+		mn, mx = root.Position - Vector3.new(1.5, 3, 1.5), root.Position + Vector3.new(1.5, 3, 1.5)
+	end
+
+	local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+	local behindCount = 0
+	for _, x in ipairs({ mn.X, mx.X }) do
+		for _, y in ipairs({ mn.Y, mx.Y }) do
+			for _, z in ipairs({ mn.Z, mx.Z }) do
+				local pt, behind = project(camCF, Vector3.new(x, y, z), k, vp)
+				if behind then behindCount += 1 end
+				minX, minY = math.min(minX, pt.X), math.min(minY, pt.Y)
+				maxX, maxY = math.max(maxX, pt.X), math.max(maxY, pt.Y)
+			end
+		end
+	end
+
+	local show = behindCount < 8
+	minX, minY = math.max(minX, -40), math.max(minY, -40)
+	maxX, maxY = math.min(maxX, vp.X + 40), math.min(maxY, vp.Y + 40)
+	local w, h = maxX - minX, maxY - minY
+	if w < 2 or h < 2 then show = false end
+
+	local center = (mn + mx) / 2
+	local cs, cBehind = project(camCF, center, k, vp)
+	if cBehind then
+		local mid = Vector2.new(vp.X / 2, vp.Y / 2)
+		local f = mid - (cs - mid)
+		cs = Vector2.new(math.clamp(f.X, 0, vp.X), math.clamp(f.Y, 0, vp.Y))
+	end
+
+	e.line.Visible = State.Line
+	if State.Line then
+		local a = Vector2.new(vp.X / 2, 0)
+		local d = cs - a
+		e.line.Size = UDim2.fromOffset(math.max(d.Magnitude, 1), 1.5)
+		e.line.Position = UDim2.fromOffset((a.X + cs.X) / 2, (a.Y + cs.Y) / 2)
+		e.line.Rotation = math.deg(math.atan2(d.Y, d.X))
+	end
+
+	e.box.Visible = show and State.Box
+	if e.box.Visible then
+		e.box.Position = UDim2.fromOffset(minX, minY)
+		e.box.Size = UDim2.fromOffset(w, h)
+	end
+
+	local showHp = show and State.Health
+	e.bar.Visible = showHp
+	e.text.Visible = showHp
+	if showHp then
+		local ratio = hum.Health / math.max(hum.MaxHealth, 1)
+		if ratio ~= ratio then ratio = 0 end
+		ratio = math.clamp(ratio, 0, 1)
+		e.bar.Position = UDim2.fromOffset(minX - 7, minY)
+		e.bar.Size = UDim2.fromOffset(4, h)
+		e.fill.Size = UDim2.fromScale(1, ratio)
+		e.fill.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 255, 90), ratio)
+		e.text.Position = UDim2.fromOffset((minX + maxX) / 2, math.max(minY - 2, 14))
+		e.text.Text = string.format("%s  %d/%d", model.Name, math.floor(hum.Health), math.floor(hum.MaxHealth))
+	end
+end
+
+RunService:BindToRenderStep("HpTeamProEsp", Enum.RenderPriority.Camera.Value + 1, function()
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+	local vp = cam.ViewportSize
+	if vp.X < 10 or vp.Y < 10 then return end
+	local camCF = cam.CFrame
+	local k = (vp.Y / 2) / math.tan(math.rad(cam.FieldOfView) / 2)
+
+	for model, e in pairs(tracked) do
+		local ok = pcall(updateOne, model, e, cam, vp, camCF, k)
+		if not ok then hideEsp(e) end
+	end
+end)
+
+-- ===== Kill Aura =====
+local function pickTarget()
+	local char, hum, root = getChar()
+	if not char or hum.Health <= 0 then return end
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	local best, bestHum, bestRoot, bestDist
+	for model in pairs(tracked) do
+		local mh = model:FindFirstChildOfClass("Humanoid")
+		local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+		if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
+			local d = (mr.Position - root.Position).Magnitude
+			if d <= State.AuraRange then
+				local _, onScreen = cam:WorldToViewportPoint(mr.Position)
+				if onScreen and (not bestDist or d < bestDist) then
+					best, bestHum, bestRoot, bestDist = model, mh, mr, d
+				end
+			end
+		end
+	end
+	return best, bestHum, bestRoot
+end
+
+local function getTool(hum)
+	local char = lp.Character
+	local tool = char and char:FindFirstChildOfClass("Tool")
+	if tool then return tool end
+	local bp = lp:FindFirstChildOfClass("Backpack")
+	local t = bp and bp:FindFirstChildOfClass("Tool")
+	if t then
+		hum:EquipTool(t)
+		return t
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.15)
+		if not State.KillAura or killing then continue end
+
+		local model, mh, mr = pickTarget()
+		if not model then continue end
+		local char, hum, root = getChar()
+		if not char then continue end
+
+		killing = true
+		local home = root.CFrame
+		local t0 = os.clock()
+
+		pcall(function()
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") then part.CanCollide = false end
+			end
+
+			while State.KillAura
+				and mh.Health > 0
+				and model:IsDescendantOf(Workspace)
+				and hum.Health > 0
+				and os.clock() - t0 < AURA_TIMEOUT do
+
+				local target = mr.CFrame * CFrame.new(0, 0, 3)
+				root.CFrame = CFrame.lookAt(target.Position, Vector3.new(mr.Position.X, target.Position.Y, mr.Position.Z))
+				root.AssemblyLinearVelocity = Vector3.zero
+
+				local tool = getTool(hum)
+				if tool then tool:Activate() end
+
+				task.wait(0.05)
+			end
+		end)
+
+		local c2, h2, r2 = getChar()
+		if c2 and r2 then
+			r2.CFrame = home
+			r2.AssemblyLinearVelocity = Vector3.zero
+			if not State.Noclip then
+				for _, part in ipairs(c2:GetDescendants()) do
+					if part:IsA("BasePart") and SOLID[part.Name] then part.CanCollide = true end
+				end
+			end
+		end
+
+		killing = false
+	end
+end)
+
+-- ===== Auto Farm =====
+task.spawn(function()
+	while true do
+		task.wait(0.35)
+		if not State.AutoFarm then continue end
+
+		local char, hum, root = getChar()
+		if not char or hum.Health <= 0 then continue end
+
+		local best, bestDist
+		for model in pairs(tracked) do
+			local mh = model:FindFirstChildOfClass("Humanoid")
+			local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+			if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
+				local d = (mr.Position - root.Position).Magnitude
+				if not bestDist or d < bestDist then best, bestDist = mr, d end
+			end
+		end
+
+		if best and State.AutoFarm then
+			if bestDist and bestDist > 8 then
+				root.CFrame = best.CFrame + Vector3.new(0, 2, 0)
+				task.wait(0.15)
+			end
+			local tool = getTool(hum)
+			if tool then tool:Activate() end
+		end
+	end
+end)
+
+-- ===== Auto Chest =====
+local CHEST_NAMES = {
+	Chest = true, SmallChest_Survivor = true, LargeChest_Survivor = true,
+	TreasureChest_01 = true, TreasureChest_02 = true,
+	["Fishermans Chest"] = true, ["Warrior Chest"] = true, ["Pirate Chest"] = true,
+	MagmaChest = true, FrostChest = true, AlienChest = true, GhostChest = true,
+	LargeLogChest = true, SmallLogChest = true, QuestChest = true,
+	ModernChest_Large = true, ModernSmallChest = true, TreasureIslandChest = true,
+	Box = true,
+}
+
+task.spawn(function()
+	while true do
+		task.wait(0.6)
+		if not State.AutoChest then continue end
+
+		local char, hum, root = getChar()
+		if not char or hum.Health <= 0 then continue end
+
+		local bestChest, bestDist, bestPrompt
+		for _, obj in ipairs(Workspace:GetDescendants()) do
+			if not State.AutoChest then break end
+			if obj:IsA("Model") and CHEST_NAMES[obj.Name] then
+				local prompt
+				for _, d in ipairs(obj:GetDescendants()) do
+					if d:IsA("ProximityPrompt") and d.Enabled then prompt = d break end
+				end
+				if prompt then
+					local mr = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+					if mr then
+						local d = (mr.Position - root.Position).Magnitude
+						if not bestDist or d < bestDist then
+							bestChest, bestDist, bestPrompt = mr, d, prompt
+						end
+					end
+				end
+			end
+		end
+
+		if bestChest and bestPrompt and State.AutoChest then
+			root.CFrame = bestChest.CFrame + Vector3.new(0, 2, 0)
+			task.wait(0.3)
+			if State.AutoChest and bestPrompt.Parent then
+				fireproximityprompt(bestPrompt)
+			end
+			task.wait(0.6)
+		end
+	end
+end)
+
+-- ===== Auto Eat =====
+local FOOD_KEYWORDS = {
+	"chowder","fish","meat","potato","fruit","food",
+	"pizza","coconut","banana","apple","steak","egg","berry",
+}
+
+task.spawn(function()
+	while true do
+		task.wait(2)
+		if not State.AutoEat then continue end
+
+		local char, hum = getChar()
+		if not char or hum.Health <= 0 then continue end
+		if hum.Health >= hum.MaxHealth * 0.7 then continue end
+
+		local bp = lp:FindFirstChildOfClass("Backpack")
+		if not bp then continue end
+
+		for _, tool in ipairs(bp:GetChildren()) do
+			if not State.AutoEat then break end
+			if tool:IsA("Tool") then
+				local tn = tool.Name:lower()
+				local match = false
+				for _, kw in ipairs(FOOD_KEYWORDS) do
+					if tn:find(kw, 1, true) then match = true break end
+				end
+				if match then
+					hum:EquipTool(tool)
+					task.wait(0.1)
+					tool:Activate()
+					task.wait(0.3)
+					break
+				end
+			end
+		end
+	end
+end)
