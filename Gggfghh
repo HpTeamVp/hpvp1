@@ -15,7 +15,7 @@ local State = {
 	SpeedValue = 80,
 	AuraRange = 150,
 	AuraHitDelay = 0.05,
-	AutoChest = false,
+	AutoPickup = false,
 	AutoEat = false,
 	GodMode = false,
 }
@@ -233,7 +233,7 @@ addToggle("Box", "ESP Box")
 addToggle("Health", "ESP Máu")
 
 -- ===== Chức năng mới =====
-addToggle("AutoChest", "Auto Chest")
+addToggle("AutoPickup", "Hút Vật Phẩm")
 addToggle("AutoEat", "Auto Eat")
 addToggle("GodMode", "God Mode")
 
@@ -644,113 +644,30 @@ task.spawn(function()
 	end
 end)
 
--- ===== Auto Chest =====
-local CHEST_NAMES = {
-	"Chest", "SmallChest_Survivor", "LargeChest_Survivor",
-	"TreasureChest_01", "TreasureChest_02",
-	"Fishermans Chest", "Warrior Chest", "Pirate Chest",
-	"MagmaChest", "FrostChest", "AlienChest", "GhostChest",
-	"LargeLogChest", "SmallLogChest", "QuestChest",
-	"ModernChest_Large", "ModernSmallChest", "TreasureIslandChest",
-	"Box",
+-- ===== Auto Pickup =====
+local PICKUP_KEYWORDS = {
+	"item","pickup","loot","drop","coin","gold","gem","ore","wood","log",
+	"fish","meat","food","chest","crate","box","barrel","bag","scrap",
 }
-local CHEST_SET = {}
-for _, n in ipairs(CHEST_NAMES) do CHEST_SET[n] = true end
 
-local function GetModelRoot(model)
-	return model:FindFirstChild("HumanoidRootPart")
-		or model.PrimaryPart
-		or model:FindFirstChildWhichIsA("BasePart")
+local function isPickupCandidate(obj)
+	if not obj or not obj:IsDescendantOf(Workspace) then return false end
+	if obj == lp.Character then return false end
+	if obj:IsA("Tool") then return true end
+	if obj:IsA("Model") or obj:IsA("BasePart") then
+		local n = obj.Name:lower()
+		for _, kw in ipairs(PICKUP_KEYWORDS) do
+			if n:find(kw, 1, true) then return true end
+		end
+		if obj:IsA("Model") then
+			for _, d in ipairs(obj:GetDescendants()) do
+				if d:IsA("ProximityPrompt") and d.Enabled then return true end
+			end
+		end
+	end
+	return false
 end
 
 task.spawn(function()
 	while true do
-		task.wait(0.3)
-		if not State.AutoChest then continue end
-
-		local char, hum, root = getChar()
-		if not char or hum.Health <= 0 then task.wait(1) continue end
-
-		local bestChest, bestDist, bestPrompt = nil, math.huge, nil
-		local searchIn = {}
-		local chestsFolder = Workspace:FindFirstChild("Chests")
-		if chestsFolder then
-			for _, obj in ipairs(chestsFolder:GetChildren()) do
-				table.insert(searchIn, obj)
-			end
-		end
-		for _, obj in ipairs(Workspace:GetChildren()) do
-			if obj:IsA("Model") and CHEST_SET[obj.Name] then
-				table.insert(searchIn, obj)
-			end
-		end
-
-		for _, obj in ipairs(searchIn) do
-			if not State.AutoChest then break end
-			if obj:IsA("Model") and CHEST_SET[obj.Name] then
-				local prompt
-				for _, d in ipairs(obj:GetDescendants()) do
-					if d:IsA("ProximityPrompt") and d.Enabled then prompt = d break end
-				end
-				if prompt then
-					local mr = GetModelRoot(obj)
-					if mr then
-						local d = (mr.Position - root.Position).Magnitude
-						if d < bestDist then
-							bestChest, bestDist, bestPrompt = mr, d, prompt
-						end
-					end
-				end
-			end
-		end
-
-		if bestChest and bestPrompt and State.AutoChest then
-			root.CFrame = bestChest.CFrame + Vector3.new(0, 2, 0)
-			task.wait(0.3)
-			if State.AutoChest and bestPrompt and bestPrompt.Parent then
-				fireproximityprompt(bestPrompt)
-			end
-			task.wait(0.6)
-		else
-			task.wait(1.5)
-		end
-	end
-end)
-
--- ===== Auto Eat =====
-local FOOD_KEYWORDS = {
-	"chowder","fish","meat","potato","fruit","food",
-	"pizza","coconut","banana","apple","steak","egg","berry",
-}
-
-task.spawn(function()
-	while true do
-		task.wait(2)
-		if not State.AutoEat then continue end
-
-		local char, hum = getChar()
-		if not char or hum.Health <= 0 then continue end
-		if hum.Health >= hum.MaxHealth * 0.7 then continue end
-
-		local bp = lp:FindFirstChildOfClass("Backpack")
-		if not bp then continue end
-
-		for _, tool in ipairs(bp:GetChildren()) do
-			if not State.AutoEat then break end
-			if tool:IsA("Tool") then
-				local tn = tool.Name:lower()
-				local match = false
-				for _, kw in ipairs(FOOD_KEYWORDS) do
-					if tn:find(kw, 1, true) then match = true break end
-				end
-				if match then
-					hum:EquipTool(tool)
-					task.wait(0.1)
-					tool:Activate()
-					task.wait(0.3)
-					break
-				end
-			end
-		end
-	end
-end)
+		task.wait
