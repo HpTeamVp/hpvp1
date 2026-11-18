@@ -301,6 +301,7 @@ local function nearest(origin, range)
     end
     return best
 end
+
 ----------------------------------------------------------------
 -- ĐÁNH / BẮN
 ----------------------------------------------------------------
@@ -429,23 +430,31 @@ end
 env.HpInstallAimHooks = installAimHooks
 
 ----------------------------------------------------------------
--- 3. HÚT VẬT PHẨM (tele đến vật phẩm và nhặt)
+-- 3. HÚT VẬT PHẨM (tele đến mọi vật phẩm / rương / đồ game spam và nhặt)
 ----------------------------------------------------------------
 local function isCharacterPart(p)
     local m = p:FindFirstAncestorOfClass("Model")
     return m and m:FindFirstChildOfClass("Humanoid") ~= nil
 end
 
+local function isPlayerPart(inst)
+    local m = inst:FindFirstAncestorOfClass("Model")
+    while m do
+        if Players:GetPlayerFromCharacter(m) then return true end
+        m = m.Parent and m.Parent:FindFirstAncestorOfClass("Model")
+    end
+    return false
+end
+
 local pickWords = {
-    "pick", "take", "collect", "grab", "loot", "harvest", "gather", "get", "chop", "mine",
+    "pick", "take", "collect", "grab", "loot", "harvest", "gather", "chop", "mine",
     "item", "drop", "wood", "log", "iron", "stone", "rock", "ore", "coin", "gem", "gold",
-    "metal", "scrap", "fruit", "berry", "plant", "herb", "tool", "weapon", "ammo", "stick",
-    "nhặt", "lấy", "thu", "gỗ", "sắt", "đá", "vàng", "xu", "trái",
+    "metal", "scrap", "fruit", "berry", "herb", "tool", "weapon", "ammo", "stick", "orb",
+    "pickup", "reward", "money", "cash", "exp", "xp", "diamond", "crystal", "star",
+    "potion", "heal", "nhặt", "lấy", "thu", "gỗ", "sắt", "đá", "vàng", "xu", "trái",
 }
-local badWords = {
-    "door", "gate", "teleport", "portal", "shop", "buy", "sell", "enter", "exit", "open",
-    "sit", "seat", "craft", "upgrade", "quest", "talk", "vehicle", "cửa", "mua", "bán",
-}
+local badWords = { "teleport", "portal", "lava", "kill", "damage", "trap", "spawn", "checkpoint" }
+local junkWords = { "bullet", "projectile", "effect", "particle", "beam", "trail", "hitbox", "explosion", "smoke", "fx" }
 
 local function matchAny(str, words)
     str = string.lower(str)
@@ -477,45 +486,83 @@ local function holderPos(inst)
     return nil
 end
 
-local function isPlayerPart(inst)
-    local m = inst:FindFirstAncestorOfClass("Model")
-    while m do
-        if Players:GetPlayerFromCharacter(m) then return true end
-        m = m.Parent and m.Parent:FindFirstAncestorOfClass("Model")
-    end
-    return false
-end
-
 local PULL_RANGE = 500
-local itemList = {}
+local itemList, freshList = {}, {}
+local seen = {}
 local visited = {}
 local pullOrigin = nil
+local lastCollect = nil
+
+local function classify(d, fresh)
+    if LP.Character and d:IsDescendantOf(LP.Character) then return nil end
+
+    if d:IsA("ProximityPrompt") then
+        if not d.Enabled then return nil end
+        local _, holder = holderPos(d)
+        if holder and not isPlayerPart(holder) then
+            return { obj = d, kind = "prompt", holder = holder }
+        end
+
+    elseif d:IsA("ClickDetector") then
+        local _, holder = holderPos(d)
+        if holder and not isPlayerPart(holder) then
+            return { obj = d, kind = "click", holder = holder }
+        end
+
+    elseif d:IsA("BasePart") then
+        if isCharacterPart(d) then return nil end
+        if d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool") then
+            return { obj = d, kind = "touch", holder = d }
+        end
+        local txt = d.Name .. " " .. (d.Parent and d.Parent.Name or "")
+        if matchAny(txt, junkWords) or matchAny(txt, badWords) then return nil end
+
+        local hasTouch = d:FindFirstChildOfClass("TouchTransmitter") ~= nil
+        if hasTouch and ((not d.Anchored and d.Size.Magnitude <= 12) or matchAny(txt, pickWords)) then
+            return { obj = d, kind = "touch", holder = d }
+        end
+
+        -- vật mới xuất hiện (đồ trong rương rơi ra, đồ game spam)
+        if fresh and d.Transparency < 1 and d.Size.Magnitude <= 8 then
+            local near = lastCollect and os.clock() - lastCollect.t < 12
+                and (d.Position - lastCollect.pos).Magnitude <= 60
+            if near or matchAny(txt, pickWords) then
+                return { obj = d, kind = "touch", holder = d }
+            end
+        end
+    end
+    return nil
+end
 
 local function scanItems()
     local list = {}
     for _, d in ipairs(Workspace:GetDescendants()) do
-        if not (LP.Character and d:IsDescendantOf(LP.Character)) then
-            if d:IsA("ProximityPrompt") and d.Enabled then
-                local _, holder = holderPos(d)
-                if holder and not isPlayerPart(holder) then
-                    table.insert(list, { obj = d, kind = "prompt", holder = holder })
-                end
-            elseif d:IsA("ClickDetector") then
-                local _, holder = holderPos(d)
-                if holder and not isPlayerPart(holder) then
-                    table.insert(list, { obj = d, kind = "click", holder = holder })
-                end
-            elseif d:IsA("BasePart") and d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool")
-                and not isCharacterPart(d) then
-                table.insert(list, { obj = d, kind = "touch", holder = d })
-            elseif d:IsA("BasePart") and not d.Anchored and d.Size.Magnitude <= 12
-                and d:FindFirstChildOfClass("TouchTransmitter") and not isCharacterPart(d) then
-                table.insert(list, { obj = d, kind = "touch", holder = d })
-            end
-        end
+        local c = classify(d, false)
+        if c then table.insert(list, c) end
     end
     itemList = list
+
+    local keep = {}
+    for _, c in ipairs(freshList) do
+        if c.obj.Parent and os.clock() - c.t < 90 then table.insert(keep, c) end
+    end
+    while #keep > 300 do table.remove(keep, 1) end
+    freshList = keep
 end
+
+-- Bắt vật phẩm mới xuất hiện ngay lập tức
+bind(Workspace.DescendantAdded, function(d)
+    if not S.Pull or seen[d] then return end
+    task.defer(function()
+        if not S.Pull or not d.Parent then return end
+        local c = classify(d, true)
+        if c then
+            seen[d] = true
+            c.t = os.clock()
+            table.insert(freshList, c)
+        end
+    end)
+end)
 
 task.spawn(function()
     while not unloaded do
@@ -534,8 +581,8 @@ local function collect(c, r)
         pcall(function()
             c.obj.HoldDuration = 0
             c.obj.RequiresLineOfSight = false
+            c.obj.MaxActivationDistance = 1000
         end)
-        pcall(function() c.obj.MaxActivationDistance = 1000 end)
         if fireproximityprompt then
             pcall(function() fireproximityprompt(c.obj) end)
         else
@@ -562,12 +609,13 @@ end
 
 task.spawn(function()
     while not unloaded do
-        task.wait(0.2)
+        task.wait(0.15)
         local r = root()
         if r and S.Pull then
             local basePos = pullOrigin and pullOrigin.Position or r.Position
             local best, bd = nil, math.huge
-            for _, c in ipairs(itemList) do
+
+            local function consider(c)
                 if c.obj.Parent and (not visited[c.obj] or os.clock() - visited[c.obj] > 30) then
                     local p = itemPos(c)
                     if p and (p - basePos).Magnitude <= PULL_RANGE then
@@ -576,15 +624,46 @@ task.spawn(function()
                     end
                 end
             end
+            for _, c in ipairs(freshList) do consider(c) end -- ưu tiên đồ mới
+            if not best then
+                for _, c in ipairs(itemList) do consider(c) end
+            end
+
             if best then
                 pullOrigin = pullOrigin or r.CFrame
                 visited[best.obj] = os.clock()
                 local p = itemPos(best) or r.Position
-                r.CFrame = CFrame.new(p + Vector3.new(0, 2.5, 0))
+                local y = (best.kind == "touch") and 1 or 2.5
+                r.CFrame = CFrame.new(p + Vector3.new(0, y, 0))
                 r.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.15)
                 collect(best, r)
-                task.wait(0.25)
+                lastCollect = { pos = p, t = os.clock() }
+                if best.kind == "prompt" or best.kind == "click" then
+                    task.wait(0.9) -- chờ đồ trong rương rơi ra
+                    pcall(scanItems)
+                else
+                    -- kéo vật phẩm về điểm gốc rồi nhặt tại đó
+                    local part = best.obj
+                    if part.Parent and not part.Anchored then
+                        pcall(function()
+                            part.CanCollide = false
+                            part.AssemblyLinearVelocity = Vector3.zero
+                            part.CFrame = pullOrigin + Vector3.new(0, 1, 0)
+                        end)
+                    end
+                end
+                -- về điểm lúc đầu, chạm lại vật phẩm vừa kéo về
+                r.CFrame = pullOrigin
+                r.AssemblyLinearVelocity = Vector3.zero
+                if best.kind == "touch" and best.obj.Parent and firetouchinterest then
+                    task.wait(0.1)
+                    pcall(function()
+                        firetouchinterest(r, best.obj, 0)
+                        firetouchinterest(r, best.obj, 1)
+                    end)
+                end
+                task.wait(0.15)
             elseif pullOrigin then
                 r.CFrame = pullOrigin
                 pullOrigin = nil
