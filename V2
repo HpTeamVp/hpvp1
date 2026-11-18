@@ -317,7 +317,6 @@ local function getTool()
     if t and h then h:EquipTool(t) end
     return t
 end
-
 local function attack()
     local t = getTool()
     if t then pcall(function() t:Activate() end) end
@@ -326,6 +325,7 @@ local function attack()
         VirtualUser:Button1Up(Vector2.new(0, 0), Camera.CFrame)
     end)
 end
+
 ----------------------------------------------------------------
 -- 1. TELE KILL
 ----------------------------------------------------------------
@@ -477,8 +477,8 @@ local function holderPos(inst)
 end
 
 -- Từ khóa nhận diện (thêm tên theo game của bạn vào đây)
-local fireWords = { "campfire", "camp fire", "bonfire", "fireplace", "fire pit", "firepit", "lửa trại", "lò lửa", "đống lửa" }
-local craftWords = { "craft", "workbench", "work bench", "anvil", "forge", "chế tạo", "bàn chế", "lò rèn" }
+local fireWords = { "campfire", "camp fire", "bonfire", "fireplace", "fire pit", "firepit", "campsite", "lửa trại", "lò lửa", "đống lửa", "lửa" }
+local craftWords = { "craft", "workbench", "work bench", "anvil", "forge", "chế tạo", "bàn chế", "lò rèn", "crafting", "bàn craft" }
 local fuelWords = { "wood", "log", "stick", "branch", "coal", "fuel", "plank", "gỗ", "củi", "than", "cành" }
 local matWords = {
     "wood", "log", "stick", "branch", "coal", "plank", "stone", "rock", "iron", "ore", "scrap",
@@ -578,10 +578,9 @@ local function goTo(r, pos, y)
 end
 
 -- Dời vật phẩm tới chỗ đống lửa / bàn craft
-local function moveItem(c, dest)
+local function moveItem(c, cf)
     local target = c.target
     if not target or not target.Parent then return end
-    local cf = CFrame.new(dest + Vector3.new(math.random(-3, 3), 3, math.random(-3, 3)))
     pcall(function()
         if target:IsA("Model") then
             target:PivotTo(cf)
@@ -612,32 +611,60 @@ local function nearestOf(list, from, useVisited, avoidPos)
     return best
 end
 
+local lastNote = 0
+local function notify(msg)
+    if os.clock() - lastNote < 8 then return end
+    lastNote = os.clock()
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", { Title = "Hp Team Pro V1", Text = msg, Duration = 4 })
+    end)
+end
 
-
--- Tele tới vật phẩm (để có quyền vật lý) rồi dời nó về trạm
+-- Mỗi lần: tele tới vật phẩm -> tele vật phẩm cùng người về trạm
 local function bring(list, st, r)
     local dest = itemPos(st)
     if not dest then return false end
     local it = nearestOf(list, r.Position, true, dest)
     if not it then return false end
     visited[it.target or it.obj] = os.clock()
-    goTo(r, itemPos(it), 2.5)
-    task.wait(0.15)
-    moveItem(it, dest)
-    task.wait(0.15)
+
+    -- 1. tele đến vật phẩm (để có quyền vật lý)
+    local p = itemPos(it)
+    if not p then return false end
+    goTo(r, p, 2.5)
+    task.wait(0.2)
+
+    -- 2. tele về trạm và giữ vật phẩm ở đó (đặt lại liên tục để server nhận vị trí)
+    goTo(r, dest, 3)
+    local cf = CFrame.new(dest + Vector3.new(math.random(-2, 2), 3, math.random(-2, 2)))
+    for _ = 1, 6 do
+        moveItem(it, cf)
+        task.wait(0.1)
+    end
     return true
 end
 
+
 local function farmFire(r)
     local st = nearestOf(stations.fire, r.Position, false)
-    if not st then return false end
-    return bring(items.fuel, st, r)
+    if not st then
+        notify("Farm Campfire: không tìm thấy đống lửa")
+        return false
+    end
+    local ok = bring(items.fuel, st, r)
+    if not ok then notify("Farm Campfire: hết củi / gỗ để dời") end
+    return ok
 end
 
 local function farmCraft(r)
     local st = nearestOf(stations.craft, r.Position, false)
-    if not st then return false end
-    return bring(items.mat, st, r)
+    if not st then
+        notify("Farm Craft: không tìm thấy bàn craft")
+        return false
+    end
+    local ok = bring(items.mat, st, r)
+    if not ok then notify("Farm Craft: hết nguyên liệu để dời") end
+    return ok
 end
 
 task.spawn(function()
@@ -946,4 +973,3 @@ table.insert(cleanups, function()
     local r = root()
     if farmOrigin and r then r.CFrame = farmOrigin end
 end)
-
