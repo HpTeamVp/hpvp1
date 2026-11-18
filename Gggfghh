@@ -10,7 +10,7 @@ local AURA_TIMEOUT = 5
 
 local State = {
 	KillAura = false,
-	AimKillPro = false,
+	AutoItem = false,
 	AirJump = false, Speed = false, Noclip = false,
 	Line = false, Box = false, Health = false,
 	SpeedValue = 80,
@@ -208,7 +208,7 @@ local function addInput(label, key, minV, maxV)
 end
 
 addToggle("KillAura", "Kill Aura")
-addToggle("AimKillPro", "Aim Kill Pro")
+addToggle("AutoItem", "Auto Item (Sắt/Nhôm/Vàng/KC)")
 addInput("Tầm quét:", "AuraRange", 10, 1000)
 addInput("Tốc đánh (s):", "AuraHitDelay", 0.01, 1)
 
@@ -602,145 +602,6 @@ local function getTool(hum)
 	end
 end
 
--- ===== Nhận diện sinh vật đa dấu hiệu =====
-local NPC_NAMES = {
-	Fisherman = true, Merchant = true, MerchantBoat = true,
-	Greenbeard = true, Captain = true, Survivor = true,
-	Penguin = true, MukuMuku = true, Muku = true,
-	Cheer = true, Chill = true, Dance = true,
-	Dance1 = true, Dance2 = true, Dance3 = true,
-	Laugh = true, Point = true, Wave = true,
-	WalkAnim = true, GameEnding = true, PiratesShowUp = true,
-	YouPart = true, StarterCharacter = true, Characters = true,
-}
-
-local CREATURE_KEYWORDS = {
-	"shark","crab","boar","seagull","fish","animal","creature","mob",
-	"monster","boss","golem","yeti","kraken","alien","ghost","pirate",
-	"skeleton","wolf","bear","snake","bird","chicken","cow","pig",
-	"rabbit","deer","zombie","slime","bat","spider","scorpion",
-}
-
-local CREATURE_FOLDERS = {
-	Creatures = true, Animals = true, Mobs = true, Enemies = true,
-	CreatureContainer = true, AnimalContainer = true,
-}
-
-local function nameHasCreatureKeyword(name)
-	local n = name:lower()
-	for _, kw in ipairs(CREATURE_KEYWORDS) do
-		if n:find(kw, 1, true) then return true end
-	end
-	return false
-end
-
-local function getAnyRoot(obj)
-	if obj:IsA("BasePart") then return obj end
-	return obj:FindFirstChild("HumanoidRootPart")
-		or obj.PrimaryPart
-		or obj:FindFirstChildWhichIsA("BasePart")
-end
-
-local function getHealthInfo(obj)
-	local hum = obj:FindFirstChildOfClass("Humanoid")
-	if hum then
-		return hum.Health > 0, hum.Health, hum.MaxHealth
-	end
-	for _, attr in ipairs({"Health","HP","Hp","health","hp"}) do
-		local v = obj:GetAttribute(attr)
-		if type(v) == "number" then
-			local mx = obj:GetAttribute("MaxHealth") or obj:GetAttribute("MaxHP") or v
-			return v > 0, v, mx
-		end
-	end
-	for _, d in ipairs(obj:GetDescendants()) do
-		if (d:IsA("NumberValue") or d:IsA("IntValue")) then
-			local dn = d.Name:lower()
-			if dn:find("health") or dn == "hp" or dn:find("máu") then
-				return d.Value > 0, d.Value, d.Value
-			end
-		end
-	end
-	return false, 0, 0
-end
-
-local function isInCreatureFolder(obj)
-	local p = obj.Parent
-	while p and p ~= Workspace do
-		if CREATURE_FOLDERS[p.Name] then return true end
-		p = p.Parent
-	end
-	return false
-end
-
-local function hasCreatureCollisionGroup(obj)
-	for _, d in ipairs(obj:GetDescendants()) do
-		if d:IsA("BasePart") then
-			local cg = d.CollisionGroup
-			if cg == "Creature" or cg == "Animal" or cg == "Enemy" or cg == "Mob" then
-				return true
-			end
-		end
-	end
-	return false
-end
-
-local function isPlayerModel(obj)
-	if obj == lp.Character then return true end
-	if Players:GetPlayerFromCharacter(obj) then return true end
-	local p = obj.Parent
-	while p do
-		if p:IsA("Player") then return true end
-		p = p.Parent
-	end
-	return false
-end
-
-local function isCreature(obj)
-	if not obj or not obj:IsDescendantOf(Workspace) then return false end
-	if isPlayerModel(obj) then return false end
-	if NPC_NAMES[obj.Name] then return false end
-
-	local alive = getHealthInfo(obj)
-	if not alive then return false end
-
-	if obj:IsA("Model") then
-		if nameHasCreatureKeyword(obj.Name) then return true end
-		if isInCreatureFolder(obj) then return true end
-		if hasCreatureCollisionGroup(obj) then return true end
-		local hum = obj:FindFirstChildOfClass("Humanoid")
-		if hum then return true end
-	end
-
-	return false
-end
-
-local function pickAimTarget()
-	local char, hum, root = getChar()
-	if not char or hum.Health <= 0 then return end
-	local cam = Workspace.CurrentCamera
-	if not cam then return end
-
-	local best, bestRoot, bestDist
-	for _, obj in ipairs(Workspace:GetDescendants()) do
-		if obj:IsA("Model") then
-			if isCreature(obj) then
-				local mr = getAnyRoot(obj)
-				if mr then
-					local d = (mr.Position - root.Position).Magnitude
-					if d <= State.AuraRange then
-						local _, onScreen = cam:WorldToViewportPoint(mr.Position)
-						if onScreen and (not bestDist or d < bestDist) then
-							best, bestRoot, bestDist = obj, mr, d
-						end
-					end
-				end
-			end
-		end
-	end
-	return best, nil, bestRoot
-end
-
 -- ===== Vòng lặp tấn công dùng chung =====
 local function attackLoop(isEnabled, pickFn)
 	while true do
@@ -770,9 +631,6 @@ local function attackLoop(isEnabled, pickFn)
 				local stillAlive = true
 				if mh and mh:IsDescendantOf(Workspace) then
 					if mh.Health <= 0 then stillAlive = false end
-				else
-					local alive2 = getHealthInfo(model)
-					if not alive2 then stillAlive = false end
 				end
 				if not stillAlive then break end
 
@@ -806,7 +664,7 @@ local function attackLoop(isEnabled, pickFn)
 	end
 end
 
--- ===== Kill Aura (dùng tracked: model có Humanoid) =====
+-- ===== Kill Aura =====
 local function pickTarget()
 	local char, hum, root = getChar()
 	if not char or hum.Health <= 0 then return end
@@ -834,7 +692,116 @@ task.spawn(function()
 	attackLoop(function() return State.KillAura end, pickTarget)
 end)
 
--- ===== Aim Kill Pro loop =====
+-- ===== Auto Item: quét 200m, teleport và nhặt sắt/nhôm/vàng/kim cương =====
+local ITEM_KEYWORDS = {
+	"sắt", "sat", "iron",
+	"nhôm", "nhom", "aluminum", "aluminium",
+	"vàng", "vang", "gold",
+	"kim cương", "kimcuong", "diamond",
+	"ore", "quặng", "quang", "mineral", "metal",
+}
+
+local AUTO_ITEM_RADIUS = 200
+
+local function nameMatchesItem(name)
+	local n = name:lower()
+	for _, kw in ipairs(ITEM_KEYWORDS) do
+		if n:find(kw, 1, true) then return true end
+	end
+	return false
+end
+
+local function itemHasPrompt(obj)
+	for _, d in ipairs(obj:GetDescendants()) do
+		if d:IsA("ProximityPrompt") and d.Enabled then
+			return d
+		end
+	end
+	return nil
+end
+
+local function getItemRoot(obj)
+	if obj:IsA("BasePart") then return obj end
+	return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+end
+
+local function isPlayerOrChar(obj)
+	if obj == lp.Character then return true end
+	if Players:GetPlayerFromCharacter(obj) then return true end
+	local p = obj.Parent
+	while p do
+		if p:IsA("Player") then return true end
+		p = p.Parent
+	end
+	return false
+end
+
+local function findNearestItem()
+	local char, hum, root = getChar()
+	if not char or hum.Health <= 0 then return end
+
+	local bestRoot, bestDist, bestPrompt
+
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Tool") then
+			if not isPlayerOrChar(obj) then
+				local prompt = itemHasPrompt(obj)
+				local named = nameMatchesItem(obj.Name)
+
+				if named or prompt then
+					local mr = getItemRoot(obj)
+					if mr then
+						local d = (mr.Position - root.Position).Magnitude
+						if d <= AUTO_ITEM_RADIUS and (not bestDist or d < bestDist) then
+							bestRoot = mr
+							bestDist = d
+							bestPrompt = prompt
+						end
+					end
+				end
+			end
+		end
+	end
+
+	return bestRoot, bestPrompt, bestDist
+end
+
 task.spawn(function()
-	attackLoop(function() return State.AimKillPro end, pickAimTarget)
+	while true do
+		task.wait(0.3)
+		if not State.AutoItem then continue end
+
+		local char, hum, root = getChar()
+		if not char or hum.Health <= 0 then task.wait(1) continue end
+
+		local targetRoot, targetPrompt = findNearestItem()
+		if not targetRoot then task.wait(1) continue end
+
+		root.CFrame = targetRoot.CFrame + Vector3.new(0, 2, 0)
+		root.AssemblyLinearVelocity = Vector3.zero
+		task.wait(0.25)
+
+		if targetPrompt and targetPrompt.Parent and targetPrompt.Enabled then
+			pcall(fireproximityprompt, targetPrompt)
+			task.wait(0.4)
+		else
+			local c2, h2, r2 = getChar()
+			if c2 and r2 and targetRoot.Parent then
+				r2.CFrame = targetRoot.CFrame
+				task.wait(0.15)
+				r2.CFrame = targetRoot.CFrame + Vector3.new(0, 2, 0)
+				task.wait(0.2)
+			end
+		end
+
+		local c3, h3 = getChar()
+		if c3 and h3 then
+			for _, t in ipairs(c3:GetChildren()) do
+				if t:IsA("Tool") and nameMatchesItem(t.Name) then
+					h3:UnequipTools()
+					break
+				end
+			end
+		end
+	end
 end)
