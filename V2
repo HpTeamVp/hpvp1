@@ -428,72 +428,156 @@ pcall(function()
 end)
 end
 env.HpInstallAimHooks = installAimHooks
+
 ----------------------------------------------------------------
--- 3. HÚT VẬT PHẨM (kéo mượt, không dịch chuyển người chơi)
+-- 3. HÚT VẬT PHẨM (tele đến vật phẩm và nhặt)
 ----------------------------------------------------------------
 local function isCharacterPart(p)
     local m = p:FindFirstAncestorOfClass("Model")
     return m and m:FindFirstChildOfClass("Humanoid") ~= nil
 end
 
--- Chỉ nhận vật phẩm thật: không neo, nhỏ, không hàn vào map.
--- Bục dịch chuyển, bẫy, cửa... thường bị neo nên bị loại.
-local function isItem(d)
-    if not d:IsA("BasePart") or d.Anchored then return false end
-    if LP.Character and d:IsDescendantOf(LP.Character) then return false end
-    if isCharacterPart(d) then return false end
-    if d.Size.Magnitude > 12 then return false end
-    local isHandle = d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool")
-    local hasTouch = d:FindFirstChildOfClass("TouchTransmitter") ~= nil
-    if not (isHandle or hasTouch) then return false end
-    if not isHandle then
-        local ok, joints = pcall(function() return d:GetJoints() end)
-        if ok and #joints > 0 then return false end
+local pickWords = {
+    "pick", "take", "collect", "grab", "loot", "harvest", "gather", "get", "chop", "mine",
+    "item", "drop", "wood", "log", "iron", "stone", "rock", "ore", "coin", "gem", "gold",
+    "metal", "scrap", "fruit", "berry", "plant", "herb", "tool", "weapon", "ammo", "stick",
+    "nhặt", "lấy", "thu", "gỗ", "sắt", "đá", "vàng", "xu", "trái",
+}
+local badWords = {
+    "door", "gate", "teleport", "portal", "shop", "buy", "sell", "enter", "exit", "open",
+    "sit", "seat", "craft", "upgrade", "quest", "talk", "vehicle", "cửa", "mua", "bán",
+}
+
+local function matchAny(str, words)
+    str = string.lower(str)
+    for _, w in ipairs(words) do
+        if str:find(w, 1, true) then return true end
     end
-    return true
+    return false
 end
 
-local pullList = {}
-local lastTouch = {}
+local function posOf(o)
+    if o:IsA("BasePart") then return o.Position end
+    if o:IsA("Attachment") then return o.WorldPosition end
+    if o:IsA("Model") then
+        local ok, cf = pcall(function() return o:GetPivot() end)
+        if ok then return cf.Position end
+    end
+    return nil
+end
+
+local function holderPos(inst)
+    local par = inst.Parent
+    local depth = 0
+    while par and depth < 6 do
+        local p = posOf(par)
+        if p then return p, par end
+        par = par.Parent
+        depth = depth + 1
+    end
+    return nil
+end
+
+local itemList = {}
+local visited = {}
+local pullOrigin = nil
+
+local function scanItems()
+    local list = {}
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if not (LP.Character and d:IsDescendantOf(LP.Character)) then
+            if d:IsA("ProximityPrompt") and d.Enabled then
+                local _, holder = holderPos(d)
+                if holder and not isCharacterPart(holder) then
+                    local txt = d.ActionText .. " " .. d.ObjectText .. " " .. holder.Name
+                        .. " " .. (holder.Parent and holder.Parent.Name or "")
+                    if matchAny(txt, pickWords) and not matchAny(txt, badWords) then
+                        table.insert(list, { obj = d, kind = "prompt", holder = holder })
+                    end
+                end
+            elseif d:IsA("ClickDetector") then
+                local _, holder = holderPos(d)
+                if holder and not isCharacterPart(holder) then
+                    local txt = holder.Name .. " " .. (holder.Parent and holder.Parent.Name or "")
+                    if matchAny(txt, pickWords) and not matchAny(txt, badWords) then
+                        table.insert(list, { obj = d, kind = "click", holder = holder })
+                    end
+                end
+            elseif d:IsA("BasePart") and d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool")
+                and not isCharacterPart(d) then
+                table.insert(list, { obj = d, kind = "touch", holder = d })
+            elseif d:IsA("BasePart") and not d.Anchored and d.Size.Magnitude <= 12
+                and d:FindFirstChildOfClass("TouchTransmitter") and not isCharacterPart(d) then
+                table.insert(list, { obj = d, kind = "touch", holder = d })
+            end
+        end
+    end
+    itemList = list
+end
 
 task.spawn(function()
     while not unloaded do
+        if S.Pull then pcall(scanItems) end
         task.wait(1)
-        if S.Pull then
-            local r = root()
-            local list = {}
-            if r then
-                for _, d in ipairs(Workspace:GetDescendants()) do
-                    if isItem(d) and (d.Position - r.Position).Magnitude <= RANGE then
-                        table.insert(list, d)
-                    end
-                end
-            end
-            pullList = list
-        else
-            pullList = {}
-        end
     end
 end)
 
-bind(RunService.Heartbeat, function()
-    if not S.Pull then return end
-    local r = root()
-    if not r then return end
-    for _, d in ipairs(pullList) do
-        if d.Parent and not d.Anchored then
-            local dist = (d.Position - r.Position).Magnitude
-            d.CanCollide = false -- không đẩy / giật người chơi
-            d.AssemblyLinearVelocity = Vector3.zero
-            d.AssemblyAngularVelocity = Vector3.zero
-            d.CFrame = d.CFrame:Lerp(CFrame.new(r.Position), 0.2)
-            if dist < 6 and firetouchinterest and os.clock() - (lastTouch[d] or 0) > 0.5 then
-                lastTouch[d] = os.clock()
-                pcall(function()
-                    firetouchinterest(r, d, 0)
-                    firetouchinterest(r, d, 1)
-                end)
+local function itemPos(c)
+    if c.kind == "touch" then return c.obj.Position end
+    return (holderPos(c.obj))
+end
+
+local function collect(c, r)
+    if c.kind == "prompt" then
+        pcall(function()
+            c.obj.HoldDuration = 0
+            c.obj.RequiresLineOfSight = false
+        end)
+        if fireproximityprompt then pcall(function() fireproximityprompt(c.obj) end) end
+    elseif c.kind == "click" then
+        if fireclickdetector then pcall(function() fireclickdetector(c.obj) end) end
+    end
+    local part = (c.kind == "touch") and c.obj or (c.holder:IsA("BasePart") and c.holder or nil)
+    if part and firetouchinterest then
+        pcall(function()
+            firetouchinterest(r, part, 0)
+            firetouchinterest(r, part, 1)
+        end)
+    end
+end
+
+task.spawn(function()
+    while not unloaded do
+        task.wait(0.2)
+        local r = root()
+        if r and S.Pull then
+            local basePos = pullOrigin and pullOrigin.Position or r.Position
+            local best, bd = nil, math.huge
+            for _, c in ipairs(itemList) do
+                if c.obj.Parent and (not visited[c.obj] or os.clock() - visited[c.obj] > 8) then
+                    local p = itemPos(c)
+                    if p and (p - basePos).Magnitude <= RANGE then
+                        local d = (p - r.Position).Magnitude
+                        if d < bd then best, bd = c, d end
+                    end
+                end
             end
+            if best then
+                pullOrigin = pullOrigin or r.CFrame
+                visited[best.obj] = os.clock()
+                local p = itemPos(best) or r.Position
+                r.CFrame = CFrame.new(p + Vector3.new(0, 3, 0))
+                r.AssemblyLinearVelocity = Vector3.zero
+                task.wait(0.15)
+                collect(best, r)
+                task.wait(0.25)
+            elseif pullOrigin then
+                r.CFrame = pullOrigin
+                pullOrigin = nil
+            end
+        elseif pullOrigin and r then
+            r.CFrame = pullOrigin
+            pullOrigin = nil
         end
     end
 end)
@@ -559,10 +643,16 @@ local espObjs = {}
 local function makeESP(t)
     local o = {}
 
-    o.box = Instance.new("SelectionBox")
-    o.box.LineThickness = 0.03
-    o.box.Color3 = Color3.fromRGB(255, 70, 70)
-    o.box.Parent = espFolder
+    o.box = Instance.new("Frame")
+    o.box.BackgroundTransparency = 1
+    o.box.BorderSizePixel = 0
+    o.box.Visible = false
+    o.box.ZIndex = 4
+    o.box.Parent = lineGui
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 70, 70)
+    stroke.Thickness = 1.5
+    stroke.Parent = o.box
 
     local bb = Instance.new("BillboardGui")
     bb.Adornee = t.root
@@ -630,7 +720,28 @@ bind(RunService.RenderStepped, function()
 
     for m, t in pairs(wanted) do
         local o = espObjs[m] or makeESP(t)
-        o.box.Adornee = S.EspBox and m or nil
+        local head = m:FindFirstChild("Head")
+        local rp = t.root.Position
+        local headPos = (head and head:IsA("BasePart")) and head.Position or (rp + Vector3.new(0, 2.5, 0))
+        local topY = (head and head:IsA("BasePart")) and (head.Position.Y + head.Size.Y / 2) or (rp.Y + t.root.Size.Y / 2)
+
+        if S.EspBox then
+            local dh = topY - rp.Y
+            local botY = rp.Y - math.max(t.hum.HipHeight + t.root.Size.Y / 2, dh * 1.25)
+            local top, on1 = Camera:WorldToViewportPoint(Vector3.new(rp.X, topY, rp.Z))
+            local bot, on2 = Camera:WorldToViewportPoint(Vector3.new(rp.X, botY, rp.Z))
+            if on1 and on2 then
+                local height = math.abs(bot.Y - top.Y)
+                local width = height * 0.6
+                o.box.Size = UDim2.fromOffset(width, height)
+                o.box.Position = UDim2.fromOffset(top.X - width / 2, math.min(top.Y, bot.Y))
+                o.box.Visible = true
+            else
+                o.box.Visible = false
+            end
+        else
+            o.box.Visible = false
+        end
         o.bb.Enabled = S.EspHp or S.EspDist
         o.hpBg.Visible = S.EspHp
         o.dist.Visible = S.EspDist
@@ -646,7 +757,7 @@ bind(RunService.RenderStepped, function()
         end
 
         if S.EspLine then
-            local v, on = Camera:WorldToViewportPoint(t.root.Position)
+            local v, on = Camera:WorldToViewportPoint(headPos)
             if on then
                 local from = Vector2.new(Camera.ViewportSize.X / 2, 0)
                 local to = Vector2.new(v.X, v.Y)
@@ -751,4 +862,9 @@ table.insert(cleanups, function()
         if p.Parent then p.CanCollide = v end
     end
     for m in pairs(espObjs) do destroyESP(m) end
+end)
+
+table.insert(cleanups, function()
+    local r = root()
+    if pullOrigin and r then r.CFrame = pullOrigin end
 end)
