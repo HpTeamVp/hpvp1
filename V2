@@ -59,7 +59,7 @@ local function refreshCache()
     for _, d in ipairs(Workspace:GetDescendants()) do
         if d:IsA("Humanoid") then
             local m = d.Parent
-            if m and m:IsA("Model") and m ~= LP.Character then
+            if m and m:IsA("Model") and m ~= LP.Character and not Players:GetPlayerFromCharacter(m) then
                 local r = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Torso") or m.PrimaryPart
                 if r then
                     table.insert(list, { model = m, hum = d, root = r })
@@ -284,7 +284,11 @@ end)
 ----------------------------------------------------------------
 -- ESP
 ----------------------------------------------------------------
-local hasDrawing = pcall(function() return Drawing.new end)
+local lineGui = Instance.new("Frame")
+lineGui.Name = "HpLines"
+lineGui.Size = UDim2.new(1, 0, 1, 0)
+lineGui.BackgroundTransparency = 1
+lineGui.Active = false
 local espFolder = Instance.new("Folder")
 espFolder.Name = "HpEspFolder"
 local espObjs = {}
@@ -327,26 +331,13 @@ local function makeESP(t)
     o.dist.TextSize = 13
     o.dist.Parent = bb
 
-    if hasDrawing then
-        o.line = Drawing.new("Line")
-        o.line.Thickness = 1.5
-        o.line.Color = Color3.fromRGB(255, 70, 70)
-        o.line.Visible = false
-    else
-        local r = root()
-        if r then
-            local a0 = Instance.new("Attachment", r)
-            local a1 = Instance.new("Attachment", t.root)
-            local beam = Instance.new("Beam")
-            beam.Attachment0, beam.Attachment1 = a0, a1
-            beam.Width0, beam.Width1 = 0.15, 0.15
-            beam.FaceCamera = true
-            beam.Color = ColorSequence.new(Color3.fromRGB(255, 70, 70))
-            beam.Enabled = false
-            beam.Parent = espFolder
-            o.beam, o.a0, o.a1 = beam, a0, a1
-        end
-    end
+    o.line = Instance.new("Frame")
+    o.line.AnchorPoint = Vector2.new(0.5, 0.5)
+    o.line.BackgroundColor3 = Color3.fromRGB(255, 70, 70)
+    o.line.BorderSizePixel = 0
+    o.line.Visible = false
+    o.line.ZIndex = 5
+    o.line.Parent = lineGui
 
     espObjs[t.model] = o
     return o
@@ -357,10 +348,7 @@ local function destroyESP(m)
     if not o then return end
     pcall(function() o.box:Destroy() end)
     pcall(function() o.bb:Destroy() end)
-    if o.line then pcall(function() o.line:Remove() end) end
-    if o.beam then pcall(function() o.beam:Destroy() end) end
-    if o.a0 then pcall(function() o.a0:Destroy() end) end
-    if o.a1 then pcall(function() o.a1:Destroy() end) end
+    if o.line then pcall(function() o.line:Destroy() end) end
     espObjs[m] = nil
 end
 
@@ -394,21 +382,21 @@ bind(RunService.RenderStepped, function()
             o.dist.Text = math.floor(t.dist) .. "m"
         end
 
-        if o.line then
-            if S.EspLine then
-                local v, on = Camera:WorldToViewportPoint(t.root.Position)
-                if on then
-                    o.line.From = Vector2.new(Camera.ViewportSize.X / 2, 0)
-                    o.line.To = Vector2.new(v.X, v.Y)
-                    o.line.Visible = true
-                else
-                    o.line.Visible = false
-                end
+        if S.EspLine then
+            local v, on = Camera:WorldToViewportPoint(t.root.Position)
+            if on then
+                local from = Vector2.new(Camera.ViewportSize.X / 2, 0)
+                local to = Vector2.new(v.X, v.Y)
+                local d = to - from
+                o.line.Size = UDim2.fromOffset(d.Magnitude, 2)
+                o.line.Position = UDim2.fromOffset((from.X + to.X) / 2, (from.Y + to.Y) / 2)
+                o.line.Rotation = math.deg(math.atan2(d.Y, d.X))
+                o.line.Visible = true
             else
                 o.line.Visible = false
             end
-        elseif o.beam then
-            o.beam.Enabled = S.EspLine
+        else
+            o.line.Visible = false
         end
     end
 end)
@@ -512,10 +500,11 @@ local function corner(p, r)
     new("UICorner", { CornerRadius = UDim.new(0, r or 8), Parent = p })
 end
 
-local gui = new("ScreenGui", { Name = "HpTeamProV1", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+local gui = new("ScreenGui", { Name = "HpTeamProV1", ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
 pcall(function() gui.Parent = (gethui and gethui()) or CoreGui end)
 if not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 espFolder.Parent = gui
+lineGui.Parent = gui
 
 local main = new("Frame", {
     Size = UDim2.fromOffset(300, 350),
