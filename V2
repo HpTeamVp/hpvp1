@@ -19,7 +19,7 @@ local Camera = Workspace.CurrentCamera
 local RANGE = 150
 
 local S = {
-    TeleKill = false, Aim = false, Pull = false, Dodge = false,
+    TeleKill = false, Aim = false, FarmCraft = false, FarmFire = false, Dodge = false,
     EspLine = false, EspBox = false, EspHp = false, EspDist = false,
     AirJump = false, Fly = false, NoClip = false, Speed = false,
 }
@@ -188,7 +188,8 @@ addToggle("Main", "Tele Kill", "TeleKill")
 addToggle("Main", "Aim Súng", "Aim", function(on)
     if on and env.HpInstallAimHooks then pcall(env.HpInstallAimHooks) end
 end)
-addToggle("Main", "Hút Vật Phẩm", "Pull")
+addToggle("Main", "Farm Craft", "FarmCraft")
+addToggle("Main", "Farm Campfire", "FarmFire")
 addToggle("Main", "Né Attack", "Dodge")
 
 -- Tab Esp
@@ -325,7 +326,6 @@ local function attack()
         VirtualUser:Button1Up(Vector2.new(0, 0), Camera.CFrame)
     end)
 end
-
 ----------------------------------------------------------------
 -- 1. TELE KILL
 ----------------------------------------------------------------
@@ -430,7 +430,7 @@ end
 env.HpInstallAimHooks = installAimHooks
 
 ----------------------------------------------------------------
--- 3. HÚT VẬT PHẨM (tele đến mọi vật phẩm / rương / đồ game spam và nhặt)
+-- 3. FARM CRAFT + FARM CAMPFIRE (tele vật phẩm về chỗ đống lửa / bàn craft)
 ----------------------------------------------------------------
 local function isCharacterPart(p)
     local m = p:FindFirstAncestorOfClass("Model")
@@ -445,16 +445,6 @@ local function isPlayerPart(inst)
     end
     return false
 end
-
-local pickWords = {
-    "pick", "take", "collect", "grab", "loot", "harvest", "gather", "chop", "mine",
-    "item", "drop", "wood", "log", "iron", "stone", "rock", "ore", "coin", "gem", "gold",
-    "metal", "scrap", "fruit", "berry", "herb", "tool", "weapon", "ammo", "stick", "orb",
-    "pickup", "reward", "money", "cash", "exp", "xp", "diamond", "crystal", "star",
-    "potion", "heal", "nhặt", "lấy", "thu", "gỗ", "sắt", "đá", "vàng", "xu", "trái",
-}
-local badWords = { "teleport", "portal", "lava", "kill", "damage", "trap", "spawn", "checkpoint" }
-local junkWords = { "bullet", "projectile", "effect", "particle", "beam", "trail", "hitbox", "explosion", "smoke", "fx" }
 
 local function matchAny(str, words)
     str = string.lower(str)
@@ -486,191 +476,186 @@ local function holderPos(inst)
     return nil
 end
 
-local PULL_RANGE = 500
-local itemList, freshList = {}, {}
-local seen = {}
+-- Từ khóa nhận diện (thêm tên theo game của bạn vào đây)
+local fireWords = { "campfire", "camp fire", "bonfire", "fireplace", "fire pit", "firepit", "lửa trại", "lò lửa", "đống lửa" }
+local craftWords = { "craft", "workbench", "work bench", "anvil", "forge", "chế tạo", "bàn chế", "lò rèn" }
+local fuelWords = { "wood", "log", "stick", "branch", "coal", "fuel", "plank", "gỗ", "củi", "than", "cành" }
+local matWords = {
+    "wood", "log", "stick", "branch", "coal", "plank", "stone", "rock", "iron", "ore", "scrap",
+    "metal", "gold", "cloth", "fiber", "rope", "leather", "gỗ", "củi", "đá", "sắt", "vàng", "than",
+}
+
+local FARM_RANGE = 500
+local AT_STATION = 12 -- vật phẩm cách trạm dưới mức này coi như đã tới nơi
+local farmOrigin = nil
 local visited = {}
-local pullOrigin = nil
-local lastCollect = nil
+local stations = { fire = {}, craft = {} }
+local items = { fuel = {}, mat = {} }
 
-local function classify(d, fresh)
-    if LP.Character and d:IsDescendantOf(LP.Character) then return nil end
-
-    if d:IsA("ProximityPrompt") then
-        if not d.Enabled then return nil end
-        local _, holder = holderPos(d)
-        if holder and not isPlayerPart(holder) then
-            return { obj = d, kind = "prompt", holder = holder }
+local function textOf(inst, holder)
+    local t = ""
+    if inst:IsA("ProximityPrompt") then t = inst.ActionText .. " " .. inst.ObjectText .. " " end
+    local h = holder
+    for _ = 1, 3 do
+        if h and h ~= Workspace then
+            t = t .. h.Name .. " "
+            h = h.Parent
         end
+    end
+    return t
+end
 
-    elseif d:IsA("ClickDetector") then
-        local _, holder = holderPos(d)
-        if holder and not isPlayerPart(holder) then
-            return { obj = d, kind = "click", holder = holder }
+-- Chọn đối tượng thật sự cần dời: cả model nhỏ chứa vật phẩm, hoặc chính part đó
+local function resolveTarget(holder)
+    while holder and not (holder:IsA("BasePart") or holder:IsA("Model")) do
+        holder = holder.Parent
+    end
+    if not holder then return nil end
+    if holder:IsA("BasePart") then
+        local m = holder:FindFirstAncestorOfClass("Model")
+        if m and m ~= Workspace and not m:FindFirstChildOfClass("Humanoid") then
+            local ok, size = pcall(function() return m:GetExtentsSize().Magnitude end)
+            if ok and size <= 30 and #m:GetDescendants() <= 40 then return m end
         end
+    end
+    return holder
+end
 
-    elseif d:IsA("BasePart") then
-        if isCharacterPart(d) then return nil end
-        if d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool") then
-            return { obj = d, kind = "touch", holder = d }
-        end
-        local txt = d.Name .. " " .. (d.Parent and d.Parent.Name or "")
-        if matchAny(txt, junkWords) or matchAny(txt, badWords) then return nil end
+local function addItem(obj, holder, txt)
+    local target = resolveTarget(holder)
+    if not target then return end
+    local c = { obj = obj, target = target }
+    if matchAny(txt, fuelWords) then table.insert(items.fuel, c) end
+    if matchAny(txt, matWords) then table.insert(items.mat, c) end
+end
 
-        local hasTouch = d:FindFirstChildOfClass("TouchTransmitter") ~= nil
-        if hasTouch and ((not d.Anchored and d.Size.Magnitude <= 12) or matchAny(txt, pickWords)) then
-            return { obj = d, kind = "touch", holder = d }
-        end
-
-        -- vật mới xuất hiện (đồ trong rương rơi ra, đồ game spam)
-        if fresh and d.Transparency < 1 and d.Size.Magnitude <= 8 then
-            local near = lastCollect and os.clock() - lastCollect.t < 12
-                and (d.Position - lastCollect.pos).Magnitude <= 60
-            if near or matchAny(txt, pickWords) then
-                return { obj = d, kind = "touch", holder = d }
+local function scanFarm()
+    local fire, craft = {}, {}
+    items = { fuel = {}, mat = {} }
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if not (LP.Character and d:IsDescendantOf(LP.Character)) then
+            if (d:IsA("ProximityPrompt") and d.Enabled) or d:IsA("ClickDetector") then
+                local _, holder = holderPos(d)
+                if holder and not isPlayerPart(holder) then
+                    local txt = textOf(d, holder)
+                    if matchAny(txt, fireWords) then
+                        table.insert(fire, { obj = holder, target = resolveTarget(holder) })
+                    elseif matchAny(txt, craftWords) then
+                        table.insert(craft, { obj = holder, target = resolveTarget(holder) })
+                    else
+                        addItem(d, holder, txt)
+                    end
+                end
+            elseif (d:IsA("Model") or d:IsA("BasePart")) and not isCharacterPart(d) and not isPlayerPart(d) then
+                local name = d.Name
+                if matchAny(name, fireWords) then
+                    table.insert(fire, { obj = d, target = d })
+                elseif matchAny(name, craftWords) then
+                    table.insert(craft, { obj = d, target = d })
+                elseif d:IsA("BasePart") and not d.Anchored and d.Size.Magnitude <= 12 then
+                    addItem(d, d, name .. " " .. (d.Parent and d.Parent.Name or ""))
+                end
             end
         end
     end
-    return nil
+    stations.fire, stations.craft = fire, craft
 end
-
-local function scanItems()
-    local list = {}
-    for _, d in ipairs(Workspace:GetDescendants()) do
-        local c = classify(d, false)
-        if c then table.insert(list, c) end
-    end
-    itemList = list
-
-    local keep = {}
-    for _, c in ipairs(freshList) do
-        if c.obj.Parent and os.clock() - c.t < 90 then table.insert(keep, c) end
-    end
-    while #keep > 300 do table.remove(keep, 1) end
-    freshList = keep
-end
-
--- Bắt vật phẩm mới xuất hiện ngay lập tức
-bind(Workspace.DescendantAdded, function(d)
-    if not S.Pull or seen[d] then return end
-    task.defer(function()
-        if not S.Pull or not d.Parent then return end
-        local c = classify(d, true)
-        if c then
-            seen[d] = true
-            c.t = os.clock()
-            table.insert(freshList, c)
-        end
-    end)
-end)
 
 task.spawn(function()
     while not unloaded do
-        if S.Pull then pcall(scanItems) end
-        task.wait(1)
+        if S.FarmCraft or S.FarmFire then pcall(scanFarm) end
+        task.wait(1.5)
     end
 end)
 
 local function itemPos(c)
-    if c.kind == "touch" then return c.obj.Position end
-    return (holderPos(c.obj))
+    return posOf(c.target or c.obj)
 end
 
-local function collect(c, r)
-    if c.kind == "prompt" then
-        pcall(function()
-            c.obj.HoldDuration = 0
-            c.obj.RequiresLineOfSight = false
-            c.obj.MaxActivationDistance = 1000
-        end)
-        if fireproximityprompt then
-            pcall(function() fireproximityprompt(c.obj) end)
+local function goTo(r, pos, y)
+    r.CFrame = CFrame.new(pos + Vector3.new(0, y or 2.5, 0))
+    r.AssemblyLinearVelocity = Vector3.zero
+end
+
+-- Dời vật phẩm tới chỗ đống lửa / bàn craft
+local function moveItem(c, dest)
+    local target = c.target
+    if not target or not target.Parent then return end
+    local cf = CFrame.new(dest + Vector3.new(math.random(-3, 3), 3, math.random(-3, 3)))
+    pcall(function()
+        if target:IsA("Model") then
+            target:PivotTo(cf)
+            for _, p in ipairs(target:GetDescendants()) do
+                if p:IsA("BasePart") then p.AssemblyLinearVelocity = Vector3.zero end
+            end
         else
-            pcall(function()
-                local vim = game:GetService("VirtualInputManager")
-                local key = c.obj.KeyboardKeyCode
-                if key == Enum.KeyCode.Unknown then key = Enum.KeyCode.E end
-                vim:SendKeyEvent(true, key, false, game)
-                task.wait(0.1)
-                vim:SendKeyEvent(false, key, false, game)
-            end)
+            target.AssemblyLinearVelocity = Vector3.zero
+            target.CFrame = cf
         end
-    elseif c.kind == "click" then
-        if fireclickdetector then pcall(function() fireclickdetector(c.obj) end) end
+    end)
+end
+
+local function nearestOf(list, from, useVisited, avoidPos)
+    local best, bd = nil, math.huge
+    local base = farmOrigin and farmOrigin.Position or from
+    for _, c in ipairs(list) do
+        local t = c.target or c.obj
+        if t and t.Parent and not (useVisited and visited[t] and os.clock() - visited[t] < 120) then
+            local p = itemPos(c)
+            if p and (p - base).Magnitude <= FARM_RANGE
+                and not (avoidPos and (p - avoidPos).Magnitude < AT_STATION) then
+                local d = (p - from).Magnitude
+                if d < bd then best, bd = c, d end
+            end
+        end
     end
-    local part = (c.kind == "touch") and c.obj or (c.holder:IsA("BasePart") and c.holder or nil)
-    if part and firetouchinterest then
-        pcall(function()
-            firetouchinterest(r, part, 0)
-            firetouchinterest(r, part, 1)
-        end)
-    end
+    return best
+end
+
+
+
+-- Tele tới vật phẩm (để có quyền vật lý) rồi dời nó về trạm
+local function bring(list, st, r)
+    local dest = itemPos(st)
+    if not dest then return false end
+    local it = nearestOf(list, r.Position, true, dest)
+    if not it then return false end
+    visited[it.target or it.obj] = os.clock()
+    goTo(r, itemPos(it), 2.5)
+    task.wait(0.15)
+    moveItem(it, dest)
+    task.wait(0.15)
+    return true
+end
+
+local function farmFire(r)
+    local st = nearestOf(stations.fire, r.Position, false)
+    if not st then return false end
+    return bring(items.fuel, st, r)
+end
+
+local function farmCraft(r)
+    local st = nearestOf(stations.craft, r.Position, false)
+    if not st then return false end
+    return bring(items.mat, st, r)
 end
 
 task.spawn(function()
     while not unloaded do
-        task.wait(0.15)
+        task.wait(0.2)
         local r = root()
-        if r and S.Pull then
-            local basePos = pullOrigin and pullOrigin.Position or r.Position
-            local best, bd = nil, math.huge
-
-            local function consider(c)
-                if c.obj.Parent and (not visited[c.obj] or os.clock() - visited[c.obj] > 30) then
-                    local p = itemPos(c)
-                    if p and (p - basePos).Magnitude <= PULL_RANGE then
-                        local d = (p - r.Position).Magnitude
-                        if d < bd then best, bd = c, d end
-                    end
-                end
+        if r and (S.FarmCraft or S.FarmFire) then
+            farmOrigin = farmOrigin or r.CFrame
+            local did = false
+            if S.FarmFire then did = farmFire(r) or did end
+            if S.FarmCraft then did = farmCraft(r) or did end
+            if not did then
+                r.CFrame = farmOrigin -- hết vật phẩm: về điểm gốc
+                task.wait(0.5)
             end
-            for _, c in ipairs(freshList) do consider(c) end -- ưu tiên đồ mới
-            if not best then
-                for _, c in ipairs(itemList) do consider(c) end
-            end
-
-            if best then
-                pullOrigin = pullOrigin or r.CFrame
-                visited[best.obj] = os.clock()
-                local p = itemPos(best) or r.Position
-                local y = (best.kind == "touch") and 1 or 2.5
-                r.CFrame = CFrame.new(p + Vector3.new(0, y, 0))
-                r.AssemblyLinearVelocity = Vector3.zero
-                task.wait(0.15)
-                collect(best, r)
-                lastCollect = { pos = p, t = os.clock() }
-                if best.kind == "prompt" or best.kind == "click" then
-                    task.wait(0.9) -- chờ đồ trong rương rơi ra
-                    pcall(scanItems)
-                else
-                    -- kéo vật phẩm về điểm gốc rồi nhặt tại đó
-                    local part = best.obj
-                    if part.Parent and not part.Anchored then
-                        pcall(function()
-                            part.CanCollide = false
-                            part.AssemblyLinearVelocity = Vector3.zero
-                            part.CFrame = pullOrigin + Vector3.new(0, 1, 0)
-                        end)
-                    end
-                end
-                -- về điểm lúc đầu, chạm lại vật phẩm vừa kéo về
-                r.CFrame = pullOrigin
-                r.AssemblyLinearVelocity = Vector3.zero
-                if best.kind == "touch" and best.obj.Parent and firetouchinterest then
-                    task.wait(0.1)
-                    pcall(function()
-                        firetouchinterest(r, best.obj, 0)
-                        firetouchinterest(r, best.obj, 1)
-                    end)
-                end
-                task.wait(0.15)
-            elseif pullOrigin then
-                r.CFrame = pullOrigin
-                pullOrigin = nil
-            end
-        elseif pullOrigin and r then
-            r.CFrame = pullOrigin
-            pullOrigin = nil
+        elseif farmOrigin and r then
+            r.CFrame = farmOrigin
+            farmOrigin = nil
         end
     end
 end)
@@ -959,5 +944,6 @@ end)
 
 table.insert(cleanups, function()
     local r = root()
-    if pullOrigin and r then r.CFrame = pullOrigin end
+    if farmOrigin and r then r.CFrame = farmOrigin end
 end)
+
