@@ -42,6 +42,209 @@ local function hum()
     return c and c:FindFirstChildOfClass("Humanoid")
 end
 
+local cleanups = {}
+
+----------------------------------------------------------------
+-- GIAO DIỆN
+----------------------------------------------------------------
+local BG = Color3.fromRGB(16, 16, 22)
+local PANEL = Color3.fromRGB(26, 26, 36)
+local ROW = Color3.fromRGB(34, 34, 46)
+local ACCENT = Color3.fromRGB(0, 150, 255)
+local OFF = Color3.fromRGB(70, 70, 86)
+
+local function new(class, props)
+    local i = Instance.new(class)
+    for k, v in pairs(props) do
+        if k ~= "Parent" then i[k] = v end
+    end
+    if props.Parent then i.Parent = props.Parent end
+    return i
+end
+local function corner(p, r)
+    new("UICorner", { CornerRadius = UDim.new(0, r or 8), Parent = p })
+end
+
+local gui = new("ScreenGui", { Name = "HpTeamProV1", ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
+gui.DisplayOrder = 999
+pcall(function() if gethui then gui.Parent = gethui() end end)
+if not gui.Parent then pcall(function() gui.Parent = CoreGui end) end
+if not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
+
+local main = new("Frame", {
+    Size = UDim2.fromOffset(300, 350),
+    Position = UDim2.new(0.5, -150, 0.5, -175),
+    BackgroundColor3 = BG, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
+})
+corner(main, 12)
+new("UIStroke", { Color = ACCENT, Thickness = 1.5, Parent = main })
+
+local bar = new("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = main })
+new("TextLabel", {
+    Size = UDim2.new(1, -90, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+    Text = "Hp Team Pro V1", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold,
+    TextSize = 16, TextXAlignment = Enum.TextXAlignment.Left, Parent = bar,
+})
+
+local function barBtn(text, xOff, color)
+    local b = new("TextButton", {
+        Size = UDim2.fromOffset(30, 26), Position = UDim2.new(1, xOff, 0.5, -13), BackgroundColor3 = color,
+        Text = text, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 16,
+        AutoButtonColor = true, Parent = bar,
+    })
+    corner(b, 6)
+    return b
+end
+local btnMin = barBtn("–", -74, OFF)
+local btnClose = barBtn("X", -38, Color3.fromRGB(220, 60, 60))
+
+local body = new("Frame", {
+    Size = UDim2.new(1, 0, 1, -38), Position = UDim2.fromOffset(0, 38), BackgroundTransparency = 1, Parent = main,
+})
+
+local tabBar = new("Frame", { Size = UDim2.new(1, -16, 0, 32), Position = UDim2.fromOffset(8, 6), BackgroundTransparency = 1, Parent = body })
+local pages, tabBtns = {}, {}
+
+local function selectTab(name)
+    for n, p in pairs(pages) do p.Visible = (n == name) end
+    for n, b in pairs(tabBtns) do
+        b.BackgroundColor3 = (n == name) and ACCENT or ROW
+    end
+end
+
+local tabNames = { "Main", "Esp", "Khác" }
+for i, n in ipairs(tabNames) do
+    local b = new("TextButton", {
+        Size = UDim2.new(1 / 3, -4, 1, 0), Position = UDim2.new((i - 1) / 3, 2, 0, 0), BackgroundColor3 = ROW,
+        Text = n, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14, Parent = tabBar,
+    })
+    corner(b, 8)
+    tabBtns[n] = b
+
+    local page = new("ScrollingFrame", {
+        Size = UDim2.new(1, -16, 1, -52), Position = UDim2.fromOffset(8, 44), BackgroundTransparency = 1,
+        BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = ACCENT,
+        CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, Parent = body,
+    })
+    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
+    pages[n] = page
+    b.MouseButton1Click:Connect(function() selectTab(n) end)
+end
+
+local function addToggle(tab, text, key, onChange)
+    local row = new("Frame", { Size = UDim2.new(1, -6, 0, 38), BackgroundColor3 = ROW, BorderSizePixel = 0, Parent = pages[tab] })
+    corner(row, 8)
+    new("TextLabel", {
+        Size = UDim2.new(1, -76, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+        Text = text, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamMedium, TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+    })
+    local sw = new("TextButton", {
+        Size = UDim2.fromOffset(48, 24), Position = UDim2.new(1, -58, 0.5, -12), BackgroundColor3 = OFF,
+        Text = "", AutoButtonColor = false, Parent = row,
+    })
+    corner(sw, 12)
+    local knob = new("Frame", {
+        Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(3, 3), BackgroundColor3 = Color3.new(1, 1, 1), Parent = sw,
+    })
+    corner(knob, 9)
+
+    sw.MouseButton1Click:Connect(function()
+        S[key] = not S[key]
+        sw.BackgroundColor3 = S[key] and ACCENT or OFF
+        knob.Position = S[key] and UDim2.fromOffset(27, 3) or UDim2.fromOffset(3, 3)
+        if onChange then onChange(S[key]) end
+    end)
+end
+
+local function addInput(tab, text, default, onChange)
+    local row = new("Frame", { Size = UDim2.new(1, -6, 0, 38), BackgroundColor3 = ROW, BorderSizePixel = 0, Parent = pages[tab] })
+    corner(row, 8)
+    new("TextLabel", {
+        Size = UDim2.new(1, -90, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+        Text = text, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamMedium, TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+    })
+    local tb = new("TextBox", {
+        Size = UDim2.fromOffset(64, 26), Position = UDim2.new(1, -74, 0.5, -13), BackgroundColor3 = PANEL,
+        Text = tostring(default), TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14,
+        ClearTextOnFocus = false, Parent = row,
+    })
+    corner(tb, 6)
+    tb.FocusLost:Connect(function()
+        local n = tonumber(tb.Text)
+        if n then
+            n = math.clamp(n, 1, 500)
+            tb.Text = tostring(n)
+            onChange(n)
+        else
+            tb.Text = tostring(default)
+        end
+    end)
+end
+
+-- Tab Main
+addToggle("Main", "Tele Kill", "TeleKill")
+addToggle("Main", "Aim Súng", "Aim", function(on)
+    if on and env.HpInstallAimHooks then pcall(env.HpInstallAimHooks) end
+end)
+addToggle("Main", "Hút Vật Phẩm", "Pull")
+addToggle("Main", "Né Attack", "Dodge")
+
+-- Tab Esp
+addToggle("Esp", "Esp Line", "EspLine")
+addToggle("Esp", "Esp Box", "EspBox")
+addToggle("Esp", "Esp Health", "EspHp")
+addToggle("Esp", "Esp Distance", "EspDist")
+
+-- Tab Khác
+addToggle("Khác", "Nhảy Trên Không", "AirJump")
+addToggle("Khác", "Fly Air", "Fly")
+addToggle("Khác", "No Clip", "NoClip")
+addToggle("Khác", "Speed", "Speed")
+addInput("Khác", "Tốc độ chạy", speedVal, function(n) speedVal = n end)
+
+selectTab("Main")
+
+-- Kéo menu
+local dragging, dragStart, startPos = false, nil, nil
+bind(bar.InputBegan, function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging, dragStart, startPos = true, i.Position, main.Position
+        i.Changed:Connect(function()
+            if i.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+bind(UIS.InputChanged, function(i)
+    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - dragStart
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    end
+end)
+
+-- Thu nhỏ
+local minimized = false
+btnMin.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    body.Visible = not minimized
+    main.Size = minimized and UDim2.fromOffset(300, 38) or UDim2.fromOffset(300, 350)
+    btnMin.Text = minimized and "+" or "–"
+end)
+
+-- Thoát
+local function unload()
+    if unloaded then return end
+    unloaded = true
+    for k in pairs(S) do S[k] = false end
+    for _, f in ipairs(cleanups) do pcall(f) end
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    gui:Destroy()
+    env.HpTeamProUnload = nil
+end
+env.HpTeamProUnload = unload
+btnClose.MouseButton1Click:Connect(unload)
+
 ----------------------------------------------------------------
 -- QUÉT MODEL / NPC
 ----------------------------------------------------------------
@@ -181,6 +384,10 @@ bind(RunService.Heartbeat, function()
 end)
 
 -- Đổi hướng đạn về mod bị quét (nếu executor hỗ trợ hook)
+local hooksInstalled = false
+local function installAimHooks()
+    if hooksInstalled then return end
+    hooksInstalled = true
 pcall(function()
     if hookmetamethod and checkcaller and getnamecallmethod then
         local mouse = LP:GetMouse()
@@ -219,7 +426,8 @@ pcall(function()
         end))
     end
 end)
-
+end
+env.HpInstallAimHooks = installAimHooks
 ----------------------------------------------------------------
 -- 3. HÚT VẬT PHẨM (kéo mượt, không dịch chuyển người chơi)
 ----------------------------------------------------------------
@@ -289,6 +497,7 @@ bind(RunService.Heartbeat, function()
         end
     end
 end)
+
 ----------------------------------------------------------------
 -- 4. NÉ ATTACK
 ----------------------------------------------------------------
@@ -343,6 +552,8 @@ lineGui.BackgroundTransparency = 1
 lineGui.Active = false
 local espFolder = Instance.new("Folder")
 espFolder.Name = "HpEspFolder"
+espFolder.Parent = gui
+lineGui.Parent = gui
 local espObjs = {}
 
 local function makeESP(t)
@@ -531,197 +742,7 @@ bind(RunService.Heartbeat, function()
     end
 end)
 
-----------------------------------------------------------------
--- GIAO DIỆN
-----------------------------------------------------------------
-local BG = Color3.fromRGB(16, 16, 22)
-local PANEL = Color3.fromRGB(26, 26, 36)
-local ROW = Color3.fromRGB(34, 34, 46)
-local ACCENT = Color3.fromRGB(0, 150, 255)
-local OFF = Color3.fromRGB(70, 70, 86)
-
-local function new(class, props)
-    local i = Instance.new(class)
-    for k, v in pairs(props) do
-        if k ~= "Parent" then i[k] = v end
-    end
-    if props.Parent then i.Parent = props.Parent end
-    return i
-end
-local function corner(p, r)
-    new("UICorner", { CornerRadius = UDim.new(0, r or 8), Parent = p })
-end
-
-local gui = new("ScreenGui", { Name = "HpTeamProV1", ResetOnSpawn = false, IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling })
-pcall(function() gui.Parent = (gethui and gethui()) or CoreGui end)
-if not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
-espFolder.Parent = gui
-lineGui.Parent = gui
-
-local main = new("Frame", {
-    Size = UDim2.fromOffset(300, 350),
-    Position = UDim2.new(0.5, -150, 0.5, -175),
-    BackgroundColor3 = BG, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
-})
-corner(main, 12)
-new("UIStroke", { Color = ACCENT, Thickness = 1.5, Parent = main })
-
-local bar = new("Frame", { Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = PANEL, BorderSizePixel = 0, Parent = main })
-new("TextLabel", {
-    Size = UDim2.new(1, -90, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
-    Text = "Hp Team Pro V1", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold,
-    TextSize = 16, TextXAlignment = Enum.TextXAlignment.Left, Parent = bar,
-})
-
-local function barBtn(text, xOff, color)
-    local b = new("TextButton", {
-        Size = UDim2.fromOffset(30, 26), Position = UDim2.new(1, xOff, 0.5, -13), BackgroundColor3 = color,
-        Text = text, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 16,
-        AutoButtonColor = true, Parent = bar,
-    })
-    corner(b, 6)
-    return b
-end
-local btnMin = barBtn("–", -74, OFF)
-local btnClose = barBtn("X", -38, Color3.fromRGB(220, 60, 60))
-
-local body = new("Frame", {
-    Size = UDim2.new(1, 0, 1, -38), Position = UDim2.fromOffset(0, 38), BackgroundTransparency = 1, Parent = main,
-})
-
-local tabBar = new("Frame", { Size = UDim2.new(1, -16, 0, 32), Position = UDim2.fromOffset(8, 6), BackgroundTransparency = 1, Parent = body })
-local pages, tabBtns = {}, {}
-
-local function selectTab(name)
-    for n, p in pairs(pages) do p.Visible = (n == name) end
-    for n, b in pairs(tabBtns) do
-        b.BackgroundColor3 = (n == name) and ACCENT or ROW
-    end
-end
-
-local tabNames = { "Main", "Esp", "Khác" }
-for i, n in ipairs(tabNames) do
-    local b = new("TextButton", {
-        Size = UDim2.new(1 / 3, -4, 1, 0), Position = UDim2.new((i - 1) / 3, 2, 0, 0), BackgroundColor3 = ROW,
-        Text = n, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14, Parent = tabBar,
-    })
-    corner(b, 8)
-    tabBtns[n] = b
-
-    local page = new("ScrollingFrame", {
-        Size = UDim2.new(1, -16, 1, -52), Position = UDim2.fromOffset(8, 44), BackgroundTransparency = 1,
-        BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = ACCENT,
-        CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, Parent = body,
-    })
-    new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder, Parent = page })
-    pages[n] = page
-    b.MouseButton1Click:Connect(function() selectTab(n) end)
-end
-
-local function addToggle(tab, text, key, onChange)
-    local row = new("Frame", { Size = UDim2.new(1, -6, 0, 38), BackgroundColor3 = ROW, BorderSizePixel = 0, Parent = pages[tab] })
-    corner(row, 8)
-    new("TextLabel", {
-        Size = UDim2.new(1, -76, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
-        Text = text, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamMedium, TextSize = 14,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
-    })
-    local sw = new("TextButton", {
-        Size = UDim2.fromOffset(48, 24), Position = UDim2.new(1, -58, 0.5, -12), BackgroundColor3 = OFF,
-        Text = "", AutoButtonColor = false, Parent = row,
-    })
-    corner(sw, 12)
-    local knob = new("Frame", {
-        Size = UDim2.fromOffset(18, 18), Position = UDim2.fromOffset(3, 3), BackgroundColor3 = Color3.new(1, 1, 1), Parent = sw,
-    })
-    corner(knob, 9)
-
-    sw.MouseButton1Click:Connect(function()
-        S[key] = not S[key]
-        sw.BackgroundColor3 = S[key] and ACCENT or OFF
-        knob.Position = S[key] and UDim2.fromOffset(27, 3) or UDim2.fromOffset(3, 3)
-        if onChange then onChange(S[key]) end
-    end)
-end
-
-local function addInput(tab, text, default, onChange)
-    local row = new("Frame", { Size = UDim2.new(1, -6, 0, 38), BackgroundColor3 = ROW, BorderSizePixel = 0, Parent = pages[tab] })
-    corner(row, 8)
-    new("TextLabel", {
-        Size = UDim2.new(1, -90, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
-        Text = text, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamMedium, TextSize = 14,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
-    })
-    local tb = new("TextBox", {
-        Size = UDim2.fromOffset(64, 26), Position = UDim2.new(1, -74, 0.5, -13), BackgroundColor3 = PANEL,
-        Text = tostring(default), TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 14,
-        ClearTextOnFocus = false, Parent = row,
-    })
-    corner(tb, 6)
-    tb.FocusLost:Connect(function()
-        local n = tonumber(tb.Text)
-        if n then
-            n = math.clamp(n, 1, 500)
-            tb.Text = tostring(n)
-            onChange(n)
-        else
-            tb.Text = tostring(default)
-        end
-    end)
-end
-
--- Tab Main
-addToggle("Main", "Tele Kill", "TeleKill")
-addToggle("Main", "Aim Súng", "Aim")
-addToggle("Main", "Hút Vật Phẩm", "Pull")
-addToggle("Main", "Né Attack", "Dodge")
-
--- Tab Esp
-addToggle("Esp", "Esp Line", "EspLine")
-addToggle("Esp", "Esp Box", "EspBox")
-addToggle("Esp", "Esp Health", "EspHp")
-addToggle("Esp", "Esp Distance", "EspDist")
-
--- Tab Khác
-addToggle("Khác", "Nhảy Trên Không", "AirJump")
-addToggle("Khác", "Fly Air", "Fly")
-addToggle("Khác", "No Clip", "NoClip")
-addToggle("Khác", "Speed", "Speed")
-addInput("Khác", "Tốc độ chạy", speedVal, function(n) speedVal = n end)
-
-selectTab("Main")
-
--- Kéo menu
-local dragging, dragStart, startPos = false, nil, nil
-bind(bar.InputBegan, function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        dragging, dragStart, startPos = true, i.Position, main.Position
-        i.Changed:Connect(function()
-            if i.UserInputState == Enum.UserInputState.End then dragging = false end
-        end)
-    end
-end)
-bind(UIS.InputChanged, function(i)
-    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-        local d = i.Position - dragStart
-        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-    end
-end)
-
--- Thu nhỏ
-local minimized = false
-btnMin.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    body.Visible = not minimized
-    main.Size = minimized and UDim2.fromOffset(300, 38) or UDim2.fromOffset(300, 350)
-    btnMin.Text = minimized and "+" or "–"
-end)
-
--- Thoát
-local function unload()
-    if unloaded then return end
-    unloaded = true
-    for k in pairs(S) do S[k] = false end
+table.insert(cleanups, function()
     local r, h = root(), hum()
     if origin and r then r.CFrame = origin end
     if h then h.WalkSpeed = 16 end
@@ -730,10 +751,4 @@ local function unload()
         if p.Parent then p.CanCollide = v end
     end
     for m in pairs(espObjs) do destroyESP(m) end
-    pcall(function() RunService:UnbindFromRenderStep("HpAim") end)
-    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    gui:Destroy()
-    env.HpTeamProUnload = nil
-end
-env.HpTeamProUnload = unload
-btnClose.MouseButton1Click:Connect(unload)
+end)
