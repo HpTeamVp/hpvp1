@@ -301,7 +301,6 @@ local function nearest(origin, range)
     end
     return best
 end
-
 ----------------------------------------------------------------
 -- ĐÁNH / BẮN
 ----------------------------------------------------------------
@@ -478,6 +477,16 @@ local function holderPos(inst)
     return nil
 end
 
+local function isPlayerPart(inst)
+    local m = inst:FindFirstAncestorOfClass("Model")
+    while m do
+        if Players:GetPlayerFromCharacter(m) then return true end
+        m = m.Parent and m.Parent:FindFirstAncestorOfClass("Model")
+    end
+    return false
+end
+
+local PULL_RANGE = 500
 local itemList = {}
 local visited = {}
 local pullOrigin = nil
@@ -488,20 +497,13 @@ local function scanItems()
         if not (LP.Character and d:IsDescendantOf(LP.Character)) then
             if d:IsA("ProximityPrompt") and d.Enabled then
                 local _, holder = holderPos(d)
-                if holder and not isCharacterPart(holder) then
-                    local txt = d.ActionText .. " " .. d.ObjectText .. " " .. holder.Name
-                        .. " " .. (holder.Parent and holder.Parent.Name or "")
-                    if matchAny(txt, pickWords) and not matchAny(txt, badWords) then
-                        table.insert(list, { obj = d, kind = "prompt", holder = holder })
-                    end
+                if holder and not isPlayerPart(holder) then
+                    table.insert(list, { obj = d, kind = "prompt", holder = holder })
                 end
             elseif d:IsA("ClickDetector") then
                 local _, holder = holderPos(d)
-                if holder and not isCharacterPart(holder) then
-                    local txt = holder.Name .. " " .. (holder.Parent and holder.Parent.Name or "")
-                    if matchAny(txt, pickWords) and not matchAny(txt, badWords) then
-                        table.insert(list, { obj = d, kind = "click", holder = holder })
-                    end
+                if holder and not isPlayerPart(holder) then
+                    table.insert(list, { obj = d, kind = "click", holder = holder })
                 end
             elseif d:IsA("BasePart") and d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool")
                 and not isCharacterPart(d) then
@@ -533,7 +535,19 @@ local function collect(c, r)
             c.obj.HoldDuration = 0
             c.obj.RequiresLineOfSight = false
         end)
-        if fireproximityprompt then pcall(function() fireproximityprompt(c.obj) end) end
+        pcall(function() c.obj.MaxActivationDistance = 1000 end)
+        if fireproximityprompt then
+            pcall(function() fireproximityprompt(c.obj) end)
+        else
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                local key = c.obj.KeyboardKeyCode
+                if key == Enum.KeyCode.Unknown then key = Enum.KeyCode.E end
+                vim:SendKeyEvent(true, key, false, game)
+                task.wait(0.1)
+                vim:SendKeyEvent(false, key, false, game)
+            end)
+        end
     elseif c.kind == "click" then
         if fireclickdetector then pcall(function() fireclickdetector(c.obj) end) end
     end
@@ -554,9 +568,9 @@ task.spawn(function()
             local basePos = pullOrigin and pullOrigin.Position or r.Position
             local best, bd = nil, math.huge
             for _, c in ipairs(itemList) do
-                if c.obj.Parent and (not visited[c.obj] or os.clock() - visited[c.obj] > 8) then
+                if c.obj.Parent and (not visited[c.obj] or os.clock() - visited[c.obj] > 30) then
                     local p = itemPos(c)
-                    if p and (p - basePos).Magnitude <= RANGE then
+                    if p and (p - basePos).Magnitude <= PULL_RANGE then
                         local d = (p - r.Position).Magnitude
                         if d < bd then best, bd = c, d end
                     end
@@ -566,7 +580,7 @@ task.spawn(function()
                 pullOrigin = pullOrigin or r.CFrame
                 visited[best.obj] = os.clock()
                 local p = itemPos(best) or r.Position
-                r.CFrame = CFrame.new(p + Vector3.new(0, 3, 0))
+                r.CFrame = CFrame.new(p + Vector3.new(0, 2.5, 0))
                 r.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.15)
                 collect(best, r)
