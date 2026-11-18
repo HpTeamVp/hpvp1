@@ -10,7 +10,6 @@ local AURA_TIMEOUT = 5
 
 local State = {
 	KillAura = false,
-	AutoItem = false,
 	AirJump = false, Speed = false, Noclip = false,
 	Line = false, Box = false, Health = false,
 	SpeedValue = 80,
@@ -208,7 +207,6 @@ local function addInput(label, key, minV, maxV)
 end
 
 addToggle("KillAura", "Kill Aura")
-addToggle("AutoItem", "Auto Item (Sắt/Nhôm/Vàng/KC)")
 addInput("Tầm quét:", "AuraRange", 10, 1000)
 addInput("Tốc đánh (s):", "AuraHitDelay", 0.01, 1)
 
@@ -602,13 +600,35 @@ local function getTool(hum)
 	end
 end
 
--- ===== Vòng lặp tấn công dùng chung =====
-local function attackLoop(isEnabled, pickFn)
+local function pickTarget()
+	local char, hum, root = getChar()
+	if not char or hum.Health <= 0 then return end
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	local best, bestHum, bestRoot, bestDist
+	for model in pairs(tracked) do
+		local mh = model:FindFirstChildOfClass("Humanoid")
+		local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+		if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
+			local d = (mr.Position - root.Position).Magnitude
+			if d <= State.AuraRange then
+				local _, onScreen = cam:WorldToViewportPoint(mr.Position)
+				if onScreen and (not bestDist or d < bestDist) then
+					best, bestHum, bestRoot, bestDist = model, mh, mr, d
+				end
+			end
+		end
+	end
+	return best, bestHum, bestRoot
+end
+
+task.spawn(function()
 	while true do
 		task.wait(0.15)
-		if not isEnabled() or Hub.isKilling() then continue end
+		if not State.KillAura or Hub.isKilling() then continue end
 
-		local model, mh, mr = pickFn()
+		local model, mh, mr = pickTarget()
 		if not model or not mr then continue end
 		local char, hum, root = getChar()
 		if not char then continue end
@@ -623,7 +643,7 @@ local function attackLoop(isEnabled, pickFn)
 			end
 			hum.PlatformStand = true
 
-			while isEnabled()
+			while State.KillAura
 				and model:IsDescendantOf(Workspace)
 				and hum.Health > 0
 				and os.clock() - t0 < AURA_TIMEOUT do
@@ -661,147 +681,5 @@ local function attackLoop(isEnabled, pickFn)
 		end
 
 		Hub.setKilling(false)
-	end
-end
-
--- ===== Kill Aura =====
-local function pickTarget()
-	local char, hum, root = getChar()
-	if not char or hum.Health <= 0 then return end
-	local cam = Workspace.CurrentCamera
-	if not cam then return end
-
-	local best, bestHum, bestRoot, bestDist
-	for model in pairs(tracked) do
-		local mh = model:FindFirstChildOfClass("Humanoid")
-		local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-		if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
-			local d = (mr.Position - root.Position).Magnitude
-			if d <= State.AuraRange then
-				local _, onScreen = cam:WorldToViewportPoint(mr.Position)
-				if onScreen and (not bestDist or d < bestDist) then
-					best, bestHum, bestRoot, bestDist = model, mh, mr, d
-				end
-			end
-		end
-	end
-	return best, bestHum, bestRoot
-end
-
-task.spawn(function()
-	attackLoop(function() return State.KillAura end, pickTarget)
-end)
-
--- ===== Auto Item: quét 200m, teleport và nhặt sắt/nhôm/vàng/kim cương =====
-local ITEM_KEYWORDS = {
-	"sắt", "sat", "iron",
-	"nhôm", "nhom", "aluminum", "aluminium",
-	"vàng", "vang", "gold",
-	"kim cương", "kimcuong", "diamond",
-	"ore", "quặng", "quang", "mineral", "metal",
-}
-
-local AUTO_ITEM_RADIUS = 200
-
-local function nameMatchesItem(name)
-	local n = name:lower()
-	for _, kw in ipairs(ITEM_KEYWORDS) do
-		if n:find(kw, 1, true) then return true end
-	end
-	return false
-end
-
-local function itemHasPrompt(obj)
-	for _, d in ipairs(obj:GetDescendants()) do
-		if d:IsA("ProximityPrompt") and d.Enabled then
-			return d
-		end
-	end
-	return nil
-end
-
-local function getItemRoot(obj)
-	if obj:IsA("BasePart") then return obj end
-	return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-end
-
-local function isPlayerOrChar(obj)
-	if obj == lp.Character then return true end
-	if Players:GetPlayerFromCharacter(obj) then return true end
-	local p = obj.Parent
-	while p do
-		if p:IsA("Player") then return true end
-		p = p.Parent
-	end
-	return false
-end
-
-local function findNearestItem()
-	local char, hum, root = getChar()
-	if not char or hum.Health <= 0 then return end
-
-	local bestRoot, bestDist, bestPrompt
-
-	for _, obj in ipairs(Workspace:GetDescendants()) do
-		if obj:IsA("Model") or obj:IsA("BasePart") or obj:IsA("Tool") then
-			if not isPlayerOrChar(obj) then
-				local prompt = itemHasPrompt(obj)
-				local named = nameMatchesItem(obj.Name)
-
-				if named or prompt then
-					local mr = getItemRoot(obj)
-					if mr then
-						local d = (mr.Position - root.Position).Magnitude
-						if d <= AUTO_ITEM_RADIUS and (not bestDist or d < bestDist) then
-							bestRoot = mr
-							bestDist = d
-							bestPrompt = prompt
-						end
-					end
-				end
-			end
-		end
-	end
-
-	return bestRoot, bestPrompt, bestDist
-end
-
-task.spawn(function()
-	while true do
-		task.wait(0.3)
-		if not State.AutoItem then continue end
-
-		local char, hum, root = getChar()
-		if not char or hum.Health <= 0 then task.wait(1) continue end
-
-		local targetRoot, targetPrompt = findNearestItem()
-		if not targetRoot then task.wait(1) continue end
-
-		root.CFrame = targetRoot.CFrame + Vector3.new(0, 2, 0)
-		root.AssemblyLinearVelocity = Vector3.zero
-		task.wait(0.25)
-
-		if targetPrompt and targetPrompt.Parent and targetPrompt.Enabled then
-			pcall(fireproximityprompt, targetPrompt)
-			task.wait(0.4)
-		else
-			local c2, h2, r2 = getChar()
-			if c2 and r2 and targetRoot.Parent then
-				r2.CFrame = targetRoot.CFrame
-				task.wait(0.15)
-				r2.CFrame = targetRoot.CFrame + Vector3.new(0, 2, 0)
-				task.wait(0.2)
-			end
-		end
-
-		local c3, h3 = getChar()
-		if c3 and h3 then
-			for _, t in ipairs(c3:GetChildren()) do
-				if t:IsA("Tool") and nameMatchesItem(t.Name) then
-					h3:UnequipTools()
-					break
-				end
-			end
-		end
 	end
 end)
