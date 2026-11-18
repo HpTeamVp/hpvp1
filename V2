@@ -1,29 +1,39 @@
 
--- HP TEAM PRO V1
--- LocalScript
--- Place in StarterPlayerScripts
+--==================================================
+-- HP TEAM PRO V1 | MOBILE EDITION
+-- LocalScript | StarterPlayerScripts
+--==================================================
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
 
 local Player = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
+local Camera = Workspace.CurrentCamera
 
-local Purple = Color3.fromRGB(155, 75, 255)
-local Dark = Color3.fromRGB(23, 18, 32)
-local White = Color3.fromRGB(245, 240, 255)
+local PURPLE = Color3.fromRGB(170, 85, 255)
+local DARK = Color3.fromRGB(24, 18, 34)
+local PANEL = Color3.fromRGB(43, 31, 57)
+local WHITE = Color3.fromRGB(255,255,255)
 
-local Speed = 16
-local Fly = false
-local Noclip = false
-local ESP = false
-local LineESP = false
-local BoxESP = false
-local HealthESP = false
-local DistanceESP = false
-local AirJump = false
+local MAX_DISTANCE = 150
+local SpeedValue = 32
+
+local State = {
+    AirJump = false,
+    Fly = false,
+    Noclip = false,
+    Speed = false,
+    ESPLine = false,
+    ESPBox = false,
+    ESPHealth = false,
+    ESPDistance = false,
+    TeleKill = false,
+    Aim = false,
+    ItemMagnet = false,
+    Dodge = false
+}
 
 local Character, Humanoid, Root
 
@@ -39,7 +49,9 @@ end
 
 Player.CharacterAdded:Connect(SetupCharacter)
 
+--==================================================
 -- GUI
+--==================================================
 
 local GUI = Instance.new("ScreenGui")
 GUI.Name = "HP_TEAM_PRO_V1"
@@ -47,401 +59,591 @@ GUI.ResetOnSpawn = false
 GUI.Parent = Player:WaitForChild("PlayerGui")
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.fromOffset(310, 390)
-Main.Position = UDim2.new(.5, -155, .5, -195)
-Main.BackgroundColor3 = Dark
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(320, 420)
+Main.Position = UDim2.new(0.5,-160,0.5,-210)
+Main.BackgroundColor3 = DARK
+Main.BorderSizePixel = 0
 Main.Parent = GUI
 
-Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner",Main).CornerRadius =
+    UDim.new(0,14)
 
-local Stroke = Instance.new("UIStroke", Main)
-Stroke.Color = Purple
-Stroke.Thickness = 2
+local Border = Instance.new("UIStroke",Main)
+Border.Color = PURPLE
+Border.Thickness = 2
 
 local Header = Instance.new("Frame")
-Header.Size = UDim2.new(1, 0, 0, 48)
-Header.BackgroundColor3 = Color3.fromRGB(47, 25, 69)
+Header.Size = UDim2.new(1,0,0,48)
+Header.BackgroundColor3 = PANEL
+Header.BorderSizePixel = 0
 Header.Parent = Main
 
-Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner",Header).CornerRadius =
+    UDim.new(0,12)
 
 local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, -100, 1, 0)
-Title.Position = UDim2.fromOffset(12, 0)
+Title.Size = UDim2.new(1,-100,1,0)
+Title.Position = UDim2.fromOffset(12,0)
 Title.BackgroundTransparency = 1
 Title.Text = "♛ HP TEAM PRO V1"
-Title.TextColor3 = White
-Title.TextSize = 17
+Title.TextColor3 = WHITE
 Title.Font = Enum.Font.GothamBold
+Title.TextSize = 17
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = Header
 
-local function MakeButton(parent, text, pos, size)
-    local B = Instance.new("TextButton")
-    B.Size = size
-    B.Position = pos
-    B.BackgroundColor3 = Color3.fromRGB(48, 34, 62)
-    B.TextColor3 = White
-    B.Text = text
-    B.TextSize = 13
-    B.Font = Enum.Font.GothamBold
-    B.Parent = parent
-    Instance.new("UICorner", B).CornerRadius = UDim.new(0, 7)
-    return B
+local function Button(parent,text,pos,size)
+    local b = Instance.new("TextButton")
+    b.Size = size
+    b.Position = pos
+    b.BackgroundColor3 = PANEL
+    b.TextColor3 = WHITE
+    b.Text = text
+    b.TextSize = 13
+    b.Font = Enum.Font.GothamBold
+    b.BorderSizePixel = 0
+    b.Parent = parent
+
+    Instance.new("UICorner",b).CornerRadius =
+        UDim.new(0,8)
+
+    return b
 end
 
-local Min = MakeButton(Header, "-", UDim2.new(1, -76, 0, 7),
-    UDim2.fromOffset(30, 32))
+local Min = Button(
+    Header,"-",
+    UDim2.new(1,-78,0,8),
+    UDim2.fromOffset(30,30)
+)
 
-local Close = MakeButton(Header, "X", UDim2.new(1, -39, 0, 7),
-    UDim2.fromOffset(30, 32))
+local Close = Button(
+    Header,"X",
+    UDim2.new(1,-40,0,8),
+    UDim2.fromOffset(30,30)
+)
 
-local Content = Instance.new("Frame")
-Content.Position = UDim2.fromOffset(8, 100)
-Content.Size = UDim2.new(1, -16, 1, -108)
+local TabBar = Instance.new("Frame")
+TabBar.Position = UDim2.fromOffset(8,55)
+TabBar.Size = UDim2.new(1,-16,0,38)
+TabBar.BackgroundTransparency = 1
+TabBar.Parent = Main
+
+local Content = Instance.new("ScrollingFrame")
+Content.Position = UDim2.fromOffset(8,102)
+Content.Size = UDim2.new(1,-16,1,-110)
 Content.BackgroundTransparency = 1
+Content.BorderSizePixel = 0
+Content.ScrollBarThickness = 3
+Content.ScrollBarImageColor3 = PURPLE
+Content.CanvasSize = UDim2.new(0,0,0,0)
 Content.Parent = Main
 
-local Tabs = Instance.new("Frame")
-Tabs.Position = UDim2.fromOffset(8, 54)
-Tabs.Size = UDim2.new(1, -16, 0, 38)
-Tabs.BackgroundTransparency = 1
-Tabs.Parent = Main
+local Layout = Instance.new("UIListLayout")
+Layout.Padding = UDim.new(0,7)
+Layout.Parent = Content
 
-local CurrentTab = "MAIN"
-local Buttons = {}
-
-local function ClearContent()
-    for _, v in ipairs(Content:GetChildren()) do
-        v:Destroy()
-    end
-end
-
-local function AddToggle(name, callback)
-    local B = MakeButton(
-        Content,
-        name .. " : OFF",
-        UDim2.new(0, 0, 0, #Buttons * 43),
-        UDim2.new(1, 0, 0, 36)
+Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Content.CanvasSize = UDim2.new(
+        0,0,0,Layout.AbsoluteContentSize.Y+10
     )
-
-    local state = false
-
-    B.MouseButton1Click:Connect(function()
-        state = not state
-        B.Text = name .. (state and " : ON" or " : OFF")
-        B.BackgroundColor3 = state and Purple
-            or Color3.fromRGB(48, 34, 62)
-        callback(state)
-    end)
-
-    table.insert(Buttons, B)
-end
-
-local function RenderTab(tab)
-    CurrentTab = tab
-    Buttons = {}
-    ClearContent()
-
-    if tab == "MAIN" then
-        AddToggle("Tele Kill (chưa hỗ trợ)", function()
-        end)
-
-        AddToggle("Aim Súng (chưa hỗ trợ)", function()
-        end)
-
-        AddToggle("Hút vật phẩm (chưa hỗ trợ)", function()
-        end)
-
-        AddToggle("Né Attack (chưa hỗ trợ)", function()
-        end)
-
-    elseif tab == "ESP" then
-
-        AddToggle("ESP Line", function(v)
-            LineESP = v
-        end)
-
-        AddToggle("ESP Box", function(v)
-            BoxESP = v
-        end)
-
-        AddToggle("ESP Health", function(v)
-            HealthESP = v
-        end)
-
-        AddToggle("ESP Distance", function(v)
-            DistanceESP = v
-        end)
-
-    elseif tab == "KHÁC" then
-
-        AddToggle("Air Jump", function(v)
-            AirJump = v
-        end)
-
-        AddToggle("Fly Air", function(v)
-            Fly = v
-        end)
-
-        AddToggle("No Clip", function(v)
-            Noclip = v
-        end)
-
-        AddToggle("Speed", function(v)
-            Speed = v and 40 or 16
-            if Humanoid then
-                Humanoid.WalkSpeed = Speed
-            end
-        end)
-    end
-end
-
-local function AddTab(name, pos)
-    local B = MakeButton(
-        Tabs,
-        name,
-        UDim2.new(pos, 0, 0, 0),
-        UDim2.new(1/3, -4, 1, 0)
-    )
-
-    B.MouseButton1Click:Connect(function()
-        RenderTab(name)
-    end)
-end
-
-AddTab("MAIN", 0)
-AddTab("ESP", 1/3)
-AddTab("KHÁC", 2/3)
-
-RenderTab("MAIN")
-
--- MINIMIZE
-
-local minimized = false
-
-Min.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    Content.Visible = not minimized
-    Tabs.Visible = not minimized
-    Main.Size = minimized
-        and UDim2.fromOffset(310, 48)
-        or UDim2.fromOffset(310, 390)
 end)
 
-Close.MouseButton1Click:Connect(function()
-    Fly = false
-    Noclip = false
-    GUI:Destroy()
-end)
-
--- DRAG MOBILE + PC
+--==================================================
+-- DRAG MOBILE
+--==================================================
 
 local dragging = false
-local dragStart, startPos
+local dragStart
+local startPosition
 
 Header.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.Touch
+        or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
         dragging = true
         dragStart = input.Position
-        startPos = Main.Position
+        startPosition = Main.Position
     end
 end)
 
 UIS.InputChanged:Connect(function(input)
     if dragging and (
-        input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch
+        input.UserInputType == Enum.UserInputType.Touch
+        or input.UserInputType == Enum.UserInputType.MouseMovement
     ) then
+
         local delta = input.Position - dragStart
+
         Main.Position = UDim2.new(
-            startPos.X.Scale,
-            startPos.X.Offset + delta.X,
-            startPos.Y.Scale,
-            startPos.Y.Offset + delta.Y
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
         )
     end
 end)
 
 UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.Touch
+        or input.UserInputType == Enum.UserInputType.MouseButton1 then
         dragging = false
     end
 end)
 
+--==================================================
+-- MINIMIZE / CLOSE
+--==================================================
+
+local minimized = false
+
+Min.MouseButton1Click:Connect(function()
+    minimized = not minimized
+
+    TabBar.Visible = not minimized
+    Content.Visible = not minimized
+
+    Main.Size = minimized
+        and UDim2.fromOffset(320,48)
+        or UDim2.fromOffset(320,420)
+end)
+
+local FlyPosition
+local FlyGyro
+local FlyConnection
+
+local function StopFly()
+    if FlyPosition then
+        FlyPosition:Destroy()
+        FlyPosition = nil
+    end
+
+    if FlyGyro then
+        FlyGyro:Destroy()
+        FlyGyro = nil
+    end
+
+    if Humanoid then
+        Humanoid.PlatformStand = false
+        Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    end
+end
+
+Close.MouseButton1Click:Connect(function()
+    State.Fly = false
+    StopFly()
+    GUI:Destroy()
+end)
+
+--==================================================
+-- NPC ESP
+--==================================================
+
+local ESPFolder = Instance.new("Folder")
+ESPFolder.Name = "HP_ESP_OBJECTS"
+ESPFolder.Parent = GUI
+
+local ESPObjects = {}
+
+local function RemoveESP(model)
+    local obj = ESPObjects[model]
+
+    if obj then
+        obj:Destroy()
+        ESPObjects[model] = nil
+    end
+end
+
+local function IsNPC(model)
+    return model:IsA("Model")
+        and model:FindFirstChildOfClass("Humanoid")
+        and not Players:GetPlayerFromCharacter(model)
+end
+
+local function CreateESP(model)
+    if ESPObjects[model] or not IsNPC(model) then
+        return
+    end
+
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+
+    local root = model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChild("Head")
+
+    if not root then return end
+
+    local folder = Instance.new("Folder")
+    folder.Name = model.Name
+    folder.Parent = ESPFolder
+
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = model
+    highlight.FillTransparency = 1
+    highlight.OutlineColor = PURPLE
+    highlight.Enabled = false
+    highlight.Parent = folder
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Adornee = root
+    billboard.Size = UDim2.fromOffset(150,65)
+    billboard.StudsOffset = Vector3.new(0,3,0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = false
+    billboard.Parent = folder
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1,0,0,25)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = WHITE
+    label.TextStrokeTransparency = 0
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 12
+    label.Parent = billboard
+
+    local healthBack = Instance.new("Frame")
+    healthBack.Position = UDim2.fromOffset(10,29)
+    healthBack.Size = UDim2.new(1,-20,0,7)
+    healthBack.BackgroundColor3 = Color3.fromRGB(50,40,50)
+    healthBack.BorderSizePixel = 0
+    healthBack.Parent = billboard
+
+    local healthFill = Instance.new("Frame")
+    healthFill.Size = UDim2.fromScale(1,1)
+    healthFill.BackgroundColor3 = Color3.fromRGB(70,255,100)
+    healthFill.BorderSizePixel = 0
+    healthFill.Parent = healthBack
+
+    local line = Instance.new("Frame")
+    line.AnchorPoint = Vector2.new(0,0.5)
+    line.BorderSizePixel = 0
+    line.BackgroundColor3 = PURPLE
+    line.Visible = false
+    line.Parent = ESPFolder
+
+    ESPObjects[model] = folder
+
+    local connection
+
+    connection = RunService.RenderStepped:Connect(function()
+        if not model.Parent or not root.Parent then
+            connection:Disconnect()
+            line:Destroy()
+            RemoveESP(model)
+            return
+        end
+
+        local myRoot = Character and
+            Character:FindFirstChild("HumanoidRootPart")
+
+        if not myRoot then return end
+
+        local distance = (myRoot.Position-root.Position).Magnitude
+
+        local screen, visible =
+            Camera:WorldToViewportPoint(root.Position)
+
+        local inRange = distance <= MAX_DISTANCE
+            and visible
+            and humanoid.Health > 0
+
+        billboard.Enabled = inRange and
+            (State.ESPHealth or State.ESPDistance)
+
+        highlight.Enabled = inRange and State.ESPBox
+
+        if inRange then
+            local text = model.Name
+
+            if State.ESPHealth then
+                text = text .. " | HP " ..
+                    math.floor(humanoid.Health) ..
+                    "/" .. math.floor(humanoid.MaxHealth)
+
+                healthBack.Visible = true
+
+                healthFill.Size = UDim2.fromScale(
+                    math.clamp(
+                        humanoid.Health /
+                        math.max(humanoid.MaxHealth,1),
+                        0,1
+                    ),
+                    1
+                )
+            else
+                healthBack.Visible = false
+            end
+
+            if State.ESPDistance then
+                text = text .. " | " ..
+                    math.floor(distance) .. "m"
+            end
+
+            label.Text = text
+
+            if State.ESPLine then
+                local startPos = Vector2.new(
+                    Camera.ViewportSize.X/2,
+                    0
+                )
+
+                local endPos = Vector2.new(
+                    screen.X,
+                    screen.Y
+                )
+
+                local delta = endPos-startPos
+
+                line.Position = UDim2.fromOffset(
+                    startPos.X,startPos.Y
+                )
+
+                line.Size = UDim2.fromOffset(
+                    delta.Magnitude,2
+                )
+
+                line.Rotation = math.deg(
+                    math.atan2(delta.Y,delta.X)
+                )
+
+                line.Visible = true
+            else
+                line.Visible = false
+            end
+        else
+            line.Visible = false
+        end
+    end)
+
+    folder.Destroying:Connect(function()
+        if connection then connection:Disconnect() end
+        if line then line:Destroy() end
+    end)
+end
+
+--==================================================
+-- ESP SCANNER
+--==================================================
+
+task.spawn(function()
+    while GUI.Parent do
+        if State.ESPLine or State.ESPBox
+            or State.ESPHealth or State.ESPDistance then
+
+            for _,model in ipairs(Workspace:GetDescendants()) do
+                if IsNPC(model) then
+                    CreateESP(model)
+                end
+            end
+        else
+            for model in pairs(ESPObjects) do
+                RemoveESP(model)
+            end
+        end
+
+        task.wait(1)
+    end
+end)
+
+--==================================================
 -- AIR JUMP
+--==================================================
 
 UIS.JumpRequest:Connect(function()
-    if AirJump and Humanoid then
+    if State.AirJump and Humanoid then
         Humanoid:ChangeState(
             Enum.HumanoidStateType.Jumping
         )
     end
 end)
 
--- FLY: HOLD POSITION
+--==================================================
+-- FLY HOLD POSITION
+--==================================================
 
-local FlyPosition
-local FlyGyro
-
-RunService.Heartbeat:Connect(function()
+local function StartFly()
     if not Root or not Humanoid then return end
 
-    if Noclip then
-        for _, part in ipairs(Character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
-        end
-    end
+    StopFly()
 
-    if Fly then
-        if not FlyPosition then
-            FlyPosition = Instance.new("BodyPosition")
-            FlyPosition.MaxForce = Vector3.new(
-                1000000, 1000000, 1000000
-            )
-            FlyPosition.P = 30000
-            FlyPosition.Position = Root.Position
-            FlyPosition.Parent = Root
+    FlyPosition = Instance.new("BodyPosition")
+    FlyPosition.MaxForce = Vector3.new(1e6,1e6,1e6)
+    FlyPosition.P = 30000
+    FlyPosition.D = 1500
+    FlyPosition.Position = Root.Position
+    FlyPosition.Parent = Root
 
-            FlyGyro = Instance.new("BodyGyro")
-            FlyGyro.MaxTorque = Vector3.new(
-                1000000, 1000000, 1000000
-            )
-            FlyGyro.Parent = Root
-        end
-
-        Humanoid:ChangeState(
-            Enum.HumanoidStateType.Physics
-        )
-
-        FlyGyro.CFrame = Camera.CFrame
-        FlyPosition.Position = Root.Position
-    else
-        if FlyPosition then
-            FlyPosition:Destroy()
-            FlyPosition = nil
-        end
-
-        if FlyGyro then
-            FlyGyro:Destroy()
-            FlyGyro = nil
-        end
-    end
-end)
-
--- ESP NPC
-
-local ESPFolder = Instance.new("Folder")
-ESPFolder.Name = "HP_TEAM_ESP"
-ESPFolder.Parent = GUI
-
-local ESPObjects = {}
-
-local function RemoveESP(model)
-    if ESPObjects[model] then
-        ESPObjects[model]:Destroy()
-        ESPObjects[model] = nil
-    end
+    FlyGyro = Instance.new("BodyGyro")
+    FlyGyro.MaxTorque = Vector3.new(1e6,1e6,1e6)
+    FlyGyro.P = 30000
+    FlyGyro.CFrame = Root.CFrame
+    FlyGyro.Parent = Root
 end
 
-local function CreateESP(model)
-    if ESPObjects[model] then return end
+--==================================================
+-- SPEED / NOCLIP / FLY UPDATE
+--==================================================
 
-    if not model:IsA("Model") then return end
-    if Players:GetPlayerFromCharacter(model) then return end
-
-    local hum = model:FindFirstChildOfClass("Humanoid")
-    local part = model:FindFirstChild("HumanoidRootPart")
-        or model:FindFirstChildWhichIsA("BasePart")
-
-    if not hum or not part then return end
-
-    local highlight = Instance.new("Highlight")
-    highlight.Adornee = model
-    highlight.FillTransparency = 1
-    highlight.OutlineColor = Purple
-    highlight.Parent = ESPFolder
-
-    local billboard = Instance.new("BillboardGui")
-    billboard.Adornee = part
-    billboard.Size = UDim2.fromOffset(150, 55)
-    billboard.StudsOffset = Vector3.new(0, 3, 0)
-    billboard.AlwaysOnTop = true
-    billboard.Parent = ESPFolder
-
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.fromScale(1, 1)
-    label.BackgroundTransparency = 1
-    label.TextColor3 = White
-    label.TextStrokeTransparency = 0
-    label.TextSize = 12
-    label.Font = Enum.Font.GothamBold
-    label.Parent = billboard
-
-    ESPObjects[model] = Instance.new("Folder")
-    ESPObjects[model].Parent = ESPFolder
-    highlight.Parent = ESPObjects[model]
-    billboard.Parent = ESPObjects[model]
-
-    ESPObjects[model]:SetAttribute("Highlight", true)
-
-    local connection
-    connection = RunService.RenderStepped:Connect(function()
-        if not model.Parent or not ESP then
-            connection:Disconnect()
-            RemoveESP(model)
-            return
-        end
-
-        local distance = (Camera.CFrame.Position - part.Position).Magnitude
-
-        if distance > 150 then
-            billboard.Enabled = false
-            highlight.Enabled = false
-            return
-        end
-
-        billboard.Enabled = true
-        highlight.Enabled = BoxESP
-
-        local text = model.Name
-
-        if HealthESP then
-            text = text .. "\nHP: " ..
-                math.floor(hum.Health) .. "/" ..
-                math.floor(hum.MaxHealth)
-        end
-
-        if DistanceESP then
-            text = text .. "\n" ..
-                math.floor(distance) .. " studs"
-        end
-
-        label.Text = text
-    end)
-end
+local OriginalCollision = {}
 
 RunService.Heartbeat:Connect(function()
-    if not ESP and not LineESP and not BoxESP
-        and not HealthESP and not DistanceESP then
-        for model in pairs(ESPObjects) do
-            RemoveESP(model)
-        end
+    if not Character or not Humanoid or not Root then
         return
     end
 
-    ESP = LineESP or BoxESP or HealthESP or DistanceESP
+    Humanoid.WalkSpeed = State.Speed and SpeedValue or 16
 
-    for _, model in ipairs(workspace:GetDescendants()) do
-        if model:IsA("Model")
-            and model:FindFirstChildOfClass("Humanoid") then
-            CreateESP(model)
+    if State.Noclip then
+        for _,part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if OriginalCollision[part] == nil then
+                    OriginalCollision[part] = part.CanCollide
+                end
+                part.CanCollide = false
+            end
+        end
+    else
+        for part,value in pairs(OriginalCollision) do
+            if part and part.Parent then
+                part.CanCollide = value
+            end
+        end
+        table.clear(OriginalCollision)
+    end
+
+    if State.Fly then
+        if not FlyPosition then
+            StartFly()
+        end
+
+        if FlyPosition and FlyGyro then
+            FlyPosition.Position = Root.Position
+            FlyGyro.CFrame = Camera.CFrame
+        end
+    elseif FlyPosition then
+        StopFly()
+    end
+end)
+
+--==================================================
+-- TAB SYSTEM
+--==================================================
+
+local function ClearTab()
+    for _,obj in ipairs(Content:GetChildren()) do
+        if obj:IsA("GuiObject") then
+            obj:Destroy()
         end
     end
+end
+
+local function AddToggle(name,key,callback)
+    local button = Button(
+        Content,
+        name .. " : " ..
+        (State[key] and "ON" or "OFF"),
+        UDim2.new(),
+        UDim2.new(1,-5,0,40)
+    )
+
+    button.LayoutOrder = #Content:GetChildren()
+
+    button.MouseButton1Click:Connect(function()
+        State[key] = not State[key]
+
+        button.Text = name .. " : " ..
+            (State[key] and "ON" or "OFF")
+
+        button.BackgroundColor3 = State[key]
+            and PURPLE or PANEL
+
+        if callback then
+            callback(State[key])
+        end
+    end)
+end
+
+local function AddSlider()
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(1,-5,0,40)
+    box.BackgroundColor3 = PANEL
+    box.TextColor3 = WHITE
+    box.PlaceholderText = "Speed: 32"
+    box.Text = tostring(SpeedValue)
+    box.Font = Enum.Font.GothamBold
+    box.TextSize = 14
+    box.Parent = Content
+
+    Instance.new("UICorner",box).CornerRadius =
+        UDim.new(0,8)
+
+    box.FocusLost:Connect(function()
+        local value = tonumber(box.Text)
+
+        if value then
+            SpeedValue = math.clamp(value,16,100)
+            box.Text = tostring(SpeedValue)
+        else
+            box.Text = tostring(SpeedValue)
+        end
+    end)
+end
+
+local function RenderTab(tab)
+    ClearTab()
+
+    if tab == "MAIN" then
+        AddToggle("Tele Kill - API", "TeleKill")
+        AddToggle("Aim Súng - API", "Aim")
+        AddToggle("Hút Vật Phẩm - API", "ItemMagnet")
+        AddToggle("Né Attack - API", "Dodge")
+
+    elseif tab == "ESP" then
+        AddToggle("ESP Line","ESPLine")
+        AddToggle("ESP Box","ESPBox")
+        AddToggle("ESP Health","ESPHealth")
+        AddToggle("ESP Distance","ESPDistance")
+
+    elseif tab == "KHÁC" then
+        AddToggle("Air Jump","AirJump")
+        AddToggle("Fly Air","Fly",function(enabled)
+            if not enabled then
+                StopFly()
+            end
+        end)
+        AddToggle("No Clip","Noclip")
+        AddToggle("Speed","Speed")
+        AddSlider()
+    end
+end
+
+local function MakeTab(name,index)
+    local tab = Button(
+        TabBar,
+        name,
+        UDim2.new(index/3,3,0,0),
+        UDim2.new(1/3,-6,1,0)
+    )
+
+    tab.MouseButton1Click:Connect(function()
+        RenderTab(name)
+    end)
+end
+
+MakeTab("MAIN",0)
+MakeTab("ESP",1)
+MakeTab("KHÁC",2)
+
+RenderTab("MAIN")
+
+--==================================================
+-- CHARACTER RESPAWN CLEANUP
+--==================================================
+
+Player.CharacterAdded:Connect(function(char)
+    StopFly()
+    table.clear(OriginalCollision)
+    task.wait(0.5)
+    SetupCharacter(char)
 end)
 
 print("HP TEAM PRO V1 LOADED")
