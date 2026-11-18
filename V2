@@ -84,7 +84,7 @@ closeBtn.TextSize = 14
 closeBtn.Parent = main
 Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
 
--- Vùng chứa nội dung trống (để sau này thêm chức năng)
+-- Vùng chứa nội dung trống
 local content = Instance.new("Frame")
 content.Size = UDim2.new(1, -16, 1, -96)
 content.Position = UDim2.new(0, 8, 0, 44)
