@@ -162,11 +162,11 @@ bind(RunService.Heartbeat, function()
 end)
 
 ----------------------------------------------------------------
--- 2. AIM SÚNG
+-- 2. AIM SÚNG (silent aim: không khóa màn hình)
 ----------------------------------------------------------------
 local aimTarget = nil
 
-RunService:BindToRenderStep("HpAim", Enum.RenderPriority.Camera.Value + 1, function()
+bind(RunService.Heartbeat, function()
     if not S.Aim then aimTarget = nil return end
     local r = root()
     if not r then return end
@@ -174,20 +174,20 @@ RunService:BindToRenderStep("HpAim", Enum.RenderPriority.Camera.Value + 1, funct
     if t then
         t.part = t.model:FindFirstChild("Head") or t.root
         aimTarget = t
-        Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, t.part.Position)
-        attack()
+        attack() -- tự bắn, camera giữ nguyên
     else
         aimTarget = nil
     end
 end)
 
--- Ghim đạn: đổi Mouse.Hit / Mouse.Target về mục tiêu (nếu executor hỗ trợ)
+-- Đổi hướng đạn về mod bị quét (nếu executor hỗ trợ hook)
 pcall(function()
-    if hookmetamethod and checkcaller then
+    if hookmetamethod and checkcaller and getnamecallmethod then
         local mouse = LP:GetMouse()
         local wrap = newcclosure or function(f) return f end
-        local old
-        old = hookmetamethod(game, "__index", wrap(function(self, k)
+
+        local oldIndex
+        oldIndex = hookmetamethod(game, "__index", wrap(function(self, k)
             if S.Aim and aimTarget and aimTarget.part and self == mouse and not checkcaller() then
                 if k == "Hit" then
                     return CFrame.new(aimTarget.part.Position)
@@ -195,7 +195,27 @@ pcall(function()
                     return aimTarget.part
                 end
             end
-            return old(self, k)
+            return oldIndex(self, k)
+        end))
+
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+            if S.Aim and aimTarget and aimTarget.part and self == Workspace and not checkcaller() then
+                local m = getnamecallmethod()
+                local n = select("#", ...)
+                local a = { ... }
+                local pos = aimTarget.part.Position
+                if m == "Raycast" and typeof(a[1]) == "Vector3" and typeof(a[2]) == "Vector3" then
+                    a[2] = (pos - a[1]).Unit * a[2].Magnitude
+                    return oldNamecall(self, table.unpack(a, 1, n))
+                elseif (m == "FindPartOnRay" or m == "FindPartOnRayWithIgnoreList"
+                    or m == "FindPartOnRayWithWhitelist") and typeof(a[1]) == "Ray" then
+                    local ray = a[1]
+                    a[1] = Ray.new(ray.Origin, (pos - ray.Origin).Unit * ray.Direction.Magnitude)
+                    return oldNamecall(self, table.unpack(a, 1, n))
+                end
+            end
+            return oldNamecall(self, ...)
         end))
     end
 end)
@@ -280,7 +300,6 @@ bind(RunService.Heartbeat, function()
         end
     end
 end)
-
 ----------------------------------------------------------------
 -- ESP
 ----------------------------------------------------------------
