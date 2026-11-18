@@ -8,16 +8,6 @@ local lp = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local NORMAL_SPEED = 16
 
-local ENEMY_NAMES = {
-	["Buku Boku"]=true,["Buku Buku"]=true,["Buku Poku"]=true,["Buku Toku"]=true,
-	["Buku1"]=true,["BukuBuku"]=true,["GhostPirate"]=true,["GhostPirateCaptain"]=true,
-	["GhostPirateGunner"]=true,["GhostBombardier"]=true,["GhostGalleon"]=true,
-	["CorruptCrewman"]=true,["CorruptOfficer"]=true,["GolemBoss"]=true,
-	["MagmaGolem"]=true,["YetiBoss"]=true,["KrakenCutscene"]=true,
-	["MeleeAlien"]=true,["RaygunAlien"]=true,["SmallAlien"]=true,
-	["Shark"]=true,["Crab"]=true,["Boar"]=true,["Seagull"]=true,
-}
-
 local CHEST_SET = {}
 for _, n in ipairs({
 	"Chest","SmallChest_Survivor","LargeChest_Survivor","TreasureChest_01","TreasureChest_02",
@@ -55,21 +45,23 @@ local function GetModelRoot(m)
 	return m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart")
 end
 
+-- Đã sửa: Đánh mọi model có máu, trừ mình, player khác, và đồng đội
 local function IsEnemy(m)
 	if not m or not m.Parent then return false end
-	if ENEMY_NAMES[m.Name] then return true end
-	for _, p in ipairs(m:GetDescendants()) do
-		if p:IsA("BasePart") then
-			local cg = p.CollisionGroup
-			if cg == "Creature" or cg == "Ghost" then return true end
+	if m == lp.Character then return false end
+	if IsPlayerCharacter(m) then return false end
+
+	local hum = m:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return false end
+
+	local myChar = lp.Character
+	if myChar then
+		local myHum = myChar:FindFirstChildOfClass("Humanoid")
+		if myHum and myHum.Team and hum.Team and myHum.Team == hum.Team then
+			return false
 		end
 	end
-	local par = m.Parent
-	if par and (par.Name == "CreatureContainer" or par.Name == "Creatures") then
-		if m.Name == "Seagull_CLIENT" then return false end
-		return true
-	end
-	return false
+	return true
 end
 
 local function FindMyRaft()
@@ -236,10 +228,7 @@ local function UpdateESP()
 		end
 		for _, o in ipairs(Workspace:GetDescendants()) do
 			if o:IsA("Model") and IsEnemy(o) then
-				local h = o:FindFirstChildOfClass("Humanoid")
-				if h and h.Health > 0 then
-					CreateHighlight(o, Color3.fromRGB(255,0,0), o.Name)
-				end
+				CreateHighlight(o, Color3.fromRGB(255,0,0), o.Name)
 			end
 		end
 	end
@@ -264,7 +253,7 @@ task.spawn(function()
 			if not State.AutoFarm then break end
 			if o:IsA("Humanoid") and o.Health > 0 then
 				local m = o.Parent
-				if m and not IsPlayerCharacter(m) and IsEnemy(m) then
+				if m and IsEnemy(m) then
 					local r = GetModelRoot(m)
 					if r then
 						local d = (r.Position - hrp.Position).Magnitude
@@ -597,7 +586,7 @@ addToggle("GodMode", "Bất tử")
 addToggle("AntiAFK", "Chống AFK")
 
 header("Tự động")
-addToggle("AutoFarm", "Farm quái")
+addToggle("AutoFarm", "Farm quái (Toàn bộ)")
 addToggle("AutoChest", "Mở rương")
 addToggle("AutoEat", "Tự ăn")
 
