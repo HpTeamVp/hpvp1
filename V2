@@ -1,4 +1,4 @@
-
+--[[
     HP TEAM PRO V1
     Script client-side, chạy bằng executor, không cần server game.
     Tab: Main | Esp | Khác
@@ -289,7 +289,6 @@ bind(RunService.Heartbeat, function()
         end
     end
 end)
-
 ----------------------------------------------------------------
 -- 4. NÉ ATTACK
 ----------------------------------------------------------------
@@ -498,7 +497,7 @@ bind(RunService.Heartbeat, function()
     local dir = h.MoveDirection * spd
     bv.Velocity = Vector3.new(dir.X, jumpHeld() and 50 or 0, dir.Z)
 end)
---[[
+
 -- No Clip
 local ncOrig = {}
 bind(RunService.Stepped, function()
