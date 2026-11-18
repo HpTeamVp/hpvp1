@@ -36,7 +36,7 @@ local stroke = Instance.new("UIStroke", main)
 stroke.Color = Color3.fromRGB(0, 200, 255)
 stroke.Thickness = 1.5
 
--- Tiêu đề
+-- Tiêu đề (Đã thêm UICorner để bo tròn góc)
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 36)
 title.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
@@ -47,6 +47,9 @@ title.Font = Enum.Font.GothamBold
 title.TextSize = 15
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = main
+
+-- Thêm dòng này để bo góc thanh tiêu đề
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
 
 -- Nút thu nhỏ
 local minBtn = Instance.new("TextButton")
