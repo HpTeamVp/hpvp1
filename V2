@@ -1,4 +1,4 @@
---[[
+
     HP TEAM PRO V1
     Script client-side, chạy bằng executor, không cần server game.
     Tab: Main | Esp | Khác
@@ -221,37 +221,70 @@ pcall(function()
 end)
 
 ----------------------------------------------------------------
--- 3. HÚT VẬT PHẨM
+-- 3. HÚT VẬT PHẨM (kéo mượt, không dịch chuyển người chơi)
 ----------------------------------------------------------------
 local function isCharacterPart(p)
     local m = p:FindFirstAncestorOfClass("Model")
     return m and m:FindFirstChildOfClass("Humanoid") ~= nil
 end
 
+-- Chỉ nhận vật phẩm thật: không neo, nhỏ, không hàn vào map.
+-- Bục dịch chuyển, bẫy, cửa... thường bị neo nên bị loại.
+local function isItem(d)
+    if not d:IsA("BasePart") or d.Anchored then return false end
+    if LP.Character and d:IsDescendantOf(LP.Character) then return false end
+    if isCharacterPart(d) then return false end
+    if d.Size.Magnitude > 12 then return false end
+    local isHandle = d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool")
+    local hasTouch = d:FindFirstChildOfClass("TouchTransmitter") ~= nil
+    if not (isHandle or hasTouch) then return false end
+    if not isHandle then
+        local ok, joints = pcall(function() return d:GetJoints() end)
+        if ok and #joints > 0 then return false end
+    end
+    return true
+end
+
+local pullList = {}
+local lastTouch = {}
+
 task.spawn(function()
     while not unloaded do
-        task.wait(0.8)
+        task.wait(1)
         if S.Pull then
             local r = root()
+            local list = {}
             if r then
                 for _, d in ipairs(Workspace:GetDescendants()) do
-                    if d:IsA("BasePart") and not d:IsDescendantOf(LP.Character) then
-                        local isHandle = d.Name == "Handle" and d.Parent and d.Parent:IsA("Tool")
-                        local hasTouch = d:FindFirstChildOfClass("TouchTransmitter") ~= nil
-                        if (isHandle or hasTouch) and not isCharacterPart(d)
-                            and (d.Position - r.Position).Magnitude <= RANGE then
-                            if firetouchinterest then
-                                pcall(function()
-                                    firetouchinterest(r, d, 0)
-                                    firetouchinterest(r, d, 1)
-                                end)
-                            end
-                            if not d.Anchored then
-                                pcall(function() d.CFrame = r.CFrame end)
-                            end
-                        end
+                    if isItem(d) and (d.Position - r.Position).Magnitude <= RANGE then
+                        table.insert(list, d)
                     end
                 end
+            end
+            pullList = list
+        else
+            pullList = {}
+        end
+    end
+end)
+
+bind(RunService.Heartbeat, function()
+    if not S.Pull then return end
+    local r = root()
+    if not r then return end
+    for _, d in ipairs(pullList) do
+        if d.Parent and not d.Anchored then
+            local dist = (d.Position - r.Position).Magnitude
+            d.CanCollide = false -- không đẩy / giật người chơi
+            d.AssemblyLinearVelocity = Vector3.zero
+            d.AssemblyAngularVelocity = Vector3.zero
+            d.CFrame = d.CFrame:Lerp(CFrame.new(r.Position), 0.2)
+            if dist < 6 and firetouchinterest and os.clock() - (lastTouch[d] or 0) > 0.5 then
+                lastTouch[d] = os.clock()
+                pcall(function()
+                    firetouchinterest(r, d, 0)
+                    firetouchinterest(r, d, 1)
+                end)
             end
         end
     end
@@ -300,6 +333,7 @@ bind(RunService.Heartbeat, function()
         end
     end
 end)
+
 ----------------------------------------------------------------
 -- ESP
 ----------------------------------------------------------------
@@ -464,7 +498,7 @@ bind(RunService.Heartbeat, function()
     local dir = h.MoveDirection * spd
     bv.Velocity = Vector3.new(dir.X, jumpHeld() and 50 or 0, dir.Z)
 end)
-
+--[[
 -- No Clip
 local ncOrig = {}
 bind(RunService.Stepped, function()
