@@ -15,7 +15,6 @@ local State = {
 	SpeedValue = 80,
 	AuraRange = 150,
 	AuraHitDelay = 0.05,
-	AutoEat = false,
 	GodMode = false,
 }
 
@@ -229,8 +228,6 @@ addToggle("Noclip", "Xuyên vật cản")
 addToggle("Line", "ESP Line")
 addToggle("Box", "ESP Box")
 addToggle("Health", "ESP Máu")
-
-addToggle("AutoEat", "Auto Eat")
 addToggle("GodMode", "God Mode")
 
 -- ===== Nhân vật =====
@@ -272,17 +269,38 @@ end
 local SOLID = { Head = true, Torso = true, UpperTorso = true, LowerTorso = true, HumanoidRootPart = true }
 local lastChar, wasNoclip = nil, false
 local killing = false
+local speedConn
 
-RunService.Heartbeat:Connect(function()
+-- Chặn game reset WalkSpeed
+local function bindSpeedGuard(hum)
+	if speedConn then speedConn:Disconnect() end
+	speedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+		if State.Speed and hum.WalkSpeed ~= State.SpeedValue then
+			hum.WalkSpeed = State.SpeedValue
+		end
+	end)
+end
+
+RunService.Stepped:Connect(function()
 	local char, hum, root = getChar()
 	if not char then return end
 
 	if char ~= lastChar then
 		lastChar, wasNoclip = char, false
 		applyExclude()
+		bindSpeedGuard(hum)
 	end
 
-	hum.WalkSpeed = State.Speed and State.SpeedValue or NORMAL_SPEED
+	-- Speed: ép mỗi frame, chạy sau Humanoid update
+	if State.Speed then
+		if hum.WalkSpeed ~= State.SpeedValue then
+			hum.WalkSpeed = State.SpeedValue
+		end
+	else
+		if hum.WalkSpeed ~= NORMAL_SPEED then
+			hum.WalkSpeed = NORMAL_SPEED
+		end
+	end
 
 	if State.Noclip and not killing then
 		local p = root.Position
@@ -661,43 +679,5 @@ task.spawn(function()
 		end
 
 		Hub.setKilling(false)
-	end
-end)
-
--- ===== Auto Eat =====
-local FOOD_KEYWORDS = {
-	"chowder","fish","meat","potato","fruit","food",
-	"pizza","coconut","banana","apple","steak","egg","berry",
-}
-
-task.spawn(function()
-	while true do
-		task.wait(2)
-		if not State.AutoEat then continue end
-
-		local char, hum = getChar()
-		if not char or hum.Health <= 0 then continue end
-		if hum.Health >= hum.MaxHealth * 0.7 then continue end
-
-		local bp = lp:FindFirstChildOfClass("Backpack")
-		if not bp then continue end
-
-		for _, tool in ipairs(bp:GetChildren()) do
-			if not State.AutoEat then break end
-			if tool:IsA("Tool") then
-				local tn = tool.Name:lower()
-				local match = false
-				for _, kw in ipairs(FOOD_KEYWORDS) do
-					if tn:find(kw, 1, true) then match = true break end
-				end
-				if match then
-					hum:EquipTool(tool)
-					task.wait(0.1)
-					tool:Activate()
-					task.wait(0.3)
-					break
-				end
-			end
-		end
 	end
 end)
