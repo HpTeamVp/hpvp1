@@ -602,7 +602,7 @@ local function getTool(hum)
 	end
 end
 
--- ===== Aim Kill Pro: tìm mọi sinh vật có máu, trừ player =====
+-- ===== Nhận diện sinh vật đa dấu hiệu =====
 local NPC_NAMES = {
 	Fisherman = true, Merchant = true, MerchantBoat = true,
 	Greenbeard = true, Captain = true, Survivor = true,
@@ -614,40 +614,104 @@ local NPC_NAMES = {
 	YouPart = true, StarterCharacter = true, Characters = true,
 }
 
--- Lấy root part của model bất kỳ
-local function getAnyRoot(model)
-	return model:FindFirstChild("HumanoidRootPart")
-		or model.PrimaryPart
-		or model:FindFirstChildWhichIsA("BasePart")
+local CREATURE_KEYWORDS = {
+	"shark","crab","boar","seagull","fish","animal","creature","mob",
+	"monster","boss","golem","yeti","kraken","alien","ghost","pirate",
+	"skeleton","wolf","bear","snake","bird","chicken","cow","pig",
+	"rabbit","deer","zombie","slime","bat","spider","scorpion",
+}
+
+local CREATURE_FOLDERS = {
+	Creatures = true, Animals = true, Mobs = true, Enemies = true,
+	CreatureContainer = true, AnimalContainer = true,
+}
+
+local function nameHasCreatureKeyword(name)
+	local n = name:lower()
+	for _, kw in ipairs(CREATURE_KEYWORDS) do
+		if n:find(kw, 1, true) then return true end
+	end
+	return false
 end
 
--- Kiểm tra model có "máu" không
-local function hasHealth(model)
-	local hum = model:FindFirstChildOfClass("Humanoid")
-	if hum and hum.Health > 0 then
-		return true, hum.Health, hum.MaxHealth
+local function getAnyRoot(obj)
+	if obj:IsA("BasePart") then return obj end
+	return obj:FindFirstChild("HumanoidRootPart")
+		or obj.PrimaryPart
+		or obj:FindFirstChildWhichIsA("BasePart")
+end
+
+local function getHealthInfo(obj)
+	local hum = obj:FindFirstChildOfClass("Humanoid")
+	if hum then
+		return hum.Health > 0, hum.Health, hum.MaxHealth
 	end
-	-- Kiểm tra attribute máu
-	for _, attr in ipairs({"Health", "HP", "Hp", "health"}) do
-		local v = model:GetAttribute(attr)
-		if type(v) == "number" and v > 0 then
-			return true, v, model:GetAttribute("MaxHealth") or v
+	for _, attr in ipairs({"Health","HP","Hp","health","hp"}) do
+		local v = obj:GetAttribute(attr)
+		if type(v) == "number" then
+			local mx = obj:GetAttribute("MaxHealth") or obj:GetAttribute("MaxHP") or v
+			return v > 0, v, mx
 		end
 	end
-	-- Kiểm tra ValueBase tên chứa "health"
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("NumberValue") and d.Name:lower():find("health") and d.Value > 0 then
-			return true, d.Value, d.Value
+	for _, d in ipairs(obj:GetDescendants()) do
+		if (d:IsA("NumberValue") or d:IsA("IntValue")) then
+			local dn = d.Name:lower()
+			if dn:find("health") or dn == "hp" or dn:find("máu") then
+				return d.Value > 0, d.Value, d.Value
+			end
+		end
+	end
+	return false, 0, 0
+end
+
+local function isInCreatureFolder(obj)
+	local p = obj.Parent
+	while p and p ~= Workspace do
+		if CREATURE_FOLDERS[p.Name] then return true end
+		p = p.Parent
+	end
+	return false
+end
+
+local function hasCreatureCollisionGroup(obj)
+	for _, d in ipairs(obj:GetDescendants()) do
+		if d:IsA("BasePart") then
+			local cg = d.CollisionGroup
+			if cg == "Creature" or cg == "Animal" or cg == "Enemy" or cg == "Mob" then
+				return true
+			end
 		end
 	end
 	return false
 end
 
-local function isPlayerModel(model)
-	if model == lp.Character then return true end
-	if Players:GetPlayerFromCharacter(model) then return true end
-	-- Tool đang cầm của player khác
-	if model:FindFirstAncestorOfClass("Player") then return true end
+local function isPlayerModel(obj)
+	if obj == lp.Character then return true end
+	if Players:GetPlayerFromCharacter(obj) then return true end
+	local p = obj.Parent
+	while p do
+		if p:IsA("Player") then return true end
+		p = p.Parent
+	end
+	return false
+end
+
+local function isCreature(obj)
+	if not obj or not obj:IsDescendantOf(Workspace) then return false end
+	if isPlayerModel(obj) then return false end
+	if NPC_NAMES[obj.Name] then return false end
+
+	local alive = getHealthInfo(obj)
+	if not alive then return false end
+
+	if obj:IsA("Model") then
+		if nameHasCreatureKeyword(obj.Name) then return true end
+		if isInCreatureFolder(obj) then return true end
+		if hasCreatureCollisionGroup(obj) then return true end
+		local hum = obj:FindFirstChildOfClass("Humanoid")
+		if hum then return true end
+	end
+
 	return false
 end
 
@@ -657,30 +721,27 @@ local function pickAimTarget()
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
 
-	local best, bestRoot, bestDist, bestHum
+	local best, bestRoot, bestDist
 	for _, obj in ipairs(Workspace:GetDescendants()) do
 		if obj:IsA("Model") then
-			if not isPlayerModel(obj) and not NPC_NAMES[obj.Name] then
-				local hasHp = hasHealth(obj)
-				if hasHp then
-					local mr = getAnyRoot(obj)
-					if mr then
-						local d = (mr.Position - root.Position).Magnitude
-						if d <= State.AuraRange then
-							local _, onScreen = cam:WorldToViewportPoint(mr.Position)
-							if onScreen and (not bestDist or d < bestDist) then
-								best, bestRoot, bestDist = obj, mr, d
-								bestHum = obj:FindFirstChildOfClass("Humanoid")
-							end
+			if isCreature(obj) then
+				local mr = getAnyRoot(obj)
+				if mr then
+					local d = (mr.Position - root.Position).Magnitude
+					if d <= State.AuraRange then
+						local _, onScreen = cam:WorldToViewportPoint(mr.Position)
+						if onScreen and (not bestDist or d < bestDist) then
+							best, bestRoot, bestDist = obj, mr, d
 						end
 					end
 				end
 			end
 		end
 	end
-	return best, bestHum, bestRoot
+	return best, nil, bestRoot
 end
 
+-- ===== Vòng lặp tấn công dùng chung =====
 local function attackLoop(isEnabled, pickFn)
 	while true do
 		task.wait(0.15)
@@ -706,12 +767,11 @@ local function attackLoop(isEnabled, pickFn)
 				and hum.Health > 0
 				and os.clock() - t0 < AURA_TIMEOUT do
 
-				-- Kiểm tra còn sống không
 				local stillAlive = true
 				if mh and mh:IsDescendantOf(Workspace) then
 					if mh.Health <= 0 then stillAlive = false end
 				else
-					local alive2 = hasHealth(model)
+					local alive2 = getHealthInfo(model)
 					if not alive2 then stillAlive = false end
 				end
 				if not stillAlive then break end
@@ -746,7 +806,7 @@ local function attackLoop(isEnabled, pickFn)
 	end
 end
 
--- ===== Kill Aura (đánh mob có Humanoid trong tracked) =====
+-- ===== Kill Aura (dùng tracked: model có Humanoid) =====
 local function pickTarget()
 	local char, hum, root = getChar()
 	if not char or hum.Health <= 0 then return end
