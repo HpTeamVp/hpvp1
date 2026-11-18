@@ -10,6 +10,7 @@ local AURA_TIMEOUT = 5
 
 local State = {
 	KillAura = false,
+	KillAnimal = false,
 	AirJump = false, Speed = false, Noclip = false,
 	Line = false, Box = false, Health = false,
 	SpeedValue = 80,
@@ -207,6 +208,7 @@ local function addInput(label, key, minV, maxV)
 end
 
 addToggle("KillAura", "Kill Aura")
+addToggle("KillAnimal", "Kill Động Vật")
 addInput("Tầm quét:", "AuraRange", 10, 1000)
 addInput("Tốc đánh (s):", "AuraHitDelay", 0.01, 1)
 
@@ -271,7 +273,6 @@ local lastChar, wasNoclip = nil, false
 local killing = false
 local speedConn
 
--- Chặn game reset WalkSpeed
 local function bindSpeedGuard(hum)
 	if speedConn then speedConn:Disconnect() end
 	speedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
@@ -291,7 +292,6 @@ RunService.Stepped:Connect(function()
 		bindSpeedGuard(hum)
 	end
 
-	-- Speed: ép mỗi frame, chạy sau Humanoid update
 	if State.Speed then
 		if hum.WalkSpeed ~= State.SpeedValue then
 			hum.WalkSpeed = State.SpeedValue
@@ -573,8 +573,7 @@ _G.HpTeamPro = {
 	Players = Players,
 	isKilling = function() return killing end,
 	setKilling = function(v) killing = v end,
-}
-local Hub = _G.HpTeamPro
+}local Hub = _G.HpTeamPro
 if not Hub then
 	warn("Chạy File 1 trước.")
 	return
@@ -590,30 +589,7 @@ local Players = Hub.Players
 
 local AURA_TIMEOUT = 5
 
--- ===== Kill Aura =====
-local function pickTarget()
-	local char, hum, root = getChar()
-	if not char or hum.Health <= 0 then return end
-	local cam = Workspace.CurrentCamera
-	if not cam then return end
-
-	local best, bestHum, bestRoot, bestDist
-	for model in pairs(tracked) do
-		local mh = model:FindFirstChildOfClass("Humanoid")
-		local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-		if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
-			local d = (mr.Position - root.Position).Magnitude
-			if d <= State.AuraRange then
-				local _, onScreen = cam:WorldToViewportPoint(mr.Position)
-				if onScreen and (not bestDist or d < bestDist) then
-					best, bestHum, bestRoot, bestDist = model, mh, mr, d
-				end
-			end
-		end
-	end
-	return best, bestHum, bestRoot
-end
-
+-- ===== Hàm dùng chung =====
 local function getTool(hum)
 	local char = lp.Character
 	local tool = char and char:FindFirstChildOfClass("Tool")
@@ -626,12 +602,12 @@ local function getTool(hum)
 	end
 end
 
-task.spawn(function()
+local function attackLoop(isEnabled, pickFn)
 	while true do
 		task.wait(0.15)
-		if not State.KillAura or Hub.isKilling() then continue end
+		if not isEnabled() or Hub.isKilling() then continue end
 
-		local model, mh, mr = pickTarget()
+		local model, mh, mr = pickFn()
 		if not model then continue end
 		local char, hum, root = getChar()
 		if not char then continue end
@@ -646,7 +622,7 @@ task.spawn(function()
 			end
 			hum.PlatformStand = true
 
-			while State.KillAura
+			while isEnabled()
 				and mh.Health > 0
 				and model:IsDescendantOf(Workspace)
 				and hum.Health > 0
@@ -680,4 +656,83 @@ task.spawn(function()
 
 		Hub.setKilling(false)
 	end
+end
+
+-- ===== Kill Aura =====
+local function pickTarget()
+	local char, hum, root = getChar()
+	if not char or hum.Health <= 0 then return end
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	local best, bestHum, bestRoot, bestDist
+	for model in pairs(tracked) do
+		local mh = model:FindFirstChildOfClass("Humanoid")
+		local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+		if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
+			local d = (mr.Position - root.Position).Magnitude
+			if d <= State.AuraRange then
+				local _, onScreen = cam:WorldToViewportPoint(mr.Position)
+				if onScreen and (not bestDist or d < bestDist) then
+					best, bestHum, bestRoot, bestDist = model, mh, mr, d
+				end
+			end
+		end
+	end
+	return best, bestHum, bestRoot
+end
+
+task.spawn(function()
+	attackLoop(function() return State.KillAura end, pickTarget)
+end)
+
+-- ===== Kill Động Vật (tất cả sinh vật không phải player/NPC) =====
+local NPC_NAMES = {
+	Fisherman = true, Merchant = true, MerchantBoat = true,
+	Greenbeard = true, Captain = true, Survivor = true,
+	Penguin = true, MukuMuku = true, Muku = true,
+	Cheer = true, Chill = true, Dance = true,
+	Dance1 = true, Dance2 = true, Dance3 = true,
+	Laugh = true, Point = true, Wave = true,
+	WalkAnim = true, GameEnding = true, PiratesShowUp = true,
+	YouPart = true, StarterCharacter = true, Characters = true,
+}
+
+local function isKillableCreature(model)
+	if not model or not model:IsDescendantOf(Workspace) then return false end
+	if model == lp.Character then return false end
+	if Players:GetPlayerFromCharacter(model) then return false end
+	if NPC_NAMES[model.Name] then return false end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return false end
+	return true
+end
+
+local function pickCreature()
+	local char, hum, root = getChar()
+	if not char or hum.Health <= 0 then return end
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	local best, bestHum, bestRoot, bestDist
+	for model in pairs(tracked) do
+		if isKillableCreature(model) then
+			local mh = model:FindFirstChildOfClass("Humanoid")
+			local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+			if mh and mr then
+				local d = (mr.Position - root.Position).Magnitude
+				if d <= State.AuraRange then
+					local _, onScreen = cam:WorldToViewportPoint(mr.Position)
+					if onScreen and (not bestDist or d < bestDist) then
+						best, bestHum, bestRoot, bestDist = model, mh, mr, d
+					end
+				end
+			end
+		end
+	end
+	return best, bestHum, bestRoot
+end
+
+task.spawn(function()
+	attackLoop(function() return State.KillAnimal end, pickCreature)
 end)
