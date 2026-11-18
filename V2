@@ -1,6 +1,7 @@
 -- LocalScript: StarterPlayerScripts
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 -- ===== NHẬN DIỆN THIẾT BỊ =====
@@ -22,7 +23,7 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 260, 0, 340)
+main.Size = UDim2.new(0, 280, 0, 360) -- Tăng nhẹ chiều rộng để chứa chữ
 main.Position = UDim2.new(0, 40, 0, 60)
 main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 main.BorderSizePixel = 0
@@ -31,12 +32,11 @@ main.ClipsDescendants = true
 main.Parent = gui
 
 Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
-
 local stroke = Instance.new("UIStroke", main)
 stroke.Color = Color3.fromRGB(0, 200, 255)
 stroke.Thickness = 1.5
 
--- Tiêu đề (Đã thêm UICorner để bo tròn góc)
+-- Tiêu đề
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 36)
 title.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
@@ -47,8 +47,6 @@ title.Font = Enum.Font.GothamBold
 title.TextSize = 15
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = main
-
--- Thêm dòng này để bo góc thanh tiêu đề
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
 
 -- Nút thu nhỏ
@@ -59,7 +57,6 @@ minBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
 minBtn.Text = "—"
 minBtn.TextColor3 = Color3.new(0,0,0)
 minBtn.Font = Enum.Font.GothamBold
-minBtn.TextSize = 14
 minBtn.Parent = main
 Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
 
@@ -71,7 +68,6 @@ maxBtn.BackgroundColor3 = Color3.fromRGB(0, 220, 120)
 maxBtn.Text = "□"
 maxBtn.TextColor3 = Color3.new(0,0,0)
 maxBtn.Font = Enum.Font.GothamBold
-maxBtn.TextSize = 14
 maxBtn.Parent = main
 Instance.new("UICorner", maxBtn).CornerRadius = UDim.new(0, 6)
 
@@ -83,18 +79,49 @@ closeBtn.BackgroundColor3 = Color3.fromRGB(230, 60, 60)
 closeBtn.Text = "X"
 closeBtn.TextColor3 = Color3.new(1,1,1)
 closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 14
 closeBtn.Parent = main
 Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
 
--- Vùng chứa nội dung trống
-local content = Instance.new("Frame")
-content.Size = UDim2.new(1, -16, 1, -96)
-content.Position = UDim2.new(0, 8, 0, 44)
+-- Thanh Tab
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -16, 0, 32)
+tabBar.Position = UDim2.new(0, 8, 0, 42)
+tabBar.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+tabBar.BorderSizePixel = 0
+tabBar.Parent = main
+Instance.new("UICorner", tabBar).CornerRadius = UDim.new(0, 6)
+
+local tabMainBtn = Instance.new("TextButton")
+tabMainBtn.Size = UDim2.new(1, 0, 1, 0)
+tabMainBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
+tabMainBtn.Text = "Main"
+tabMainBtn.TextColor3 = Color3.new(1,1,1)
+tabMainBtn.Font = Enum.Font.GothamBold
+tabMainBtn.TextSize = 14
+tabMainBtn.Parent = tabBar
+Instance.new("UICorner", tabMainBtn).CornerRadius = UDim.new(0, 6)
+
+-- Vùng chứa nội dung
+local content = Instance.new("ScrollingFrame")
+content.Size = UDim2.new(1, -16, 1, -132)
+content.Position = UDim2.new(0, 8, 0, 80)
 content.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
 content.BorderSizePixel = 0
+content.CanvasSize = UDim2.new(0, 0, 0, 0)
+content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+content.ScrollBarThickness = 4
 content.Parent = main
 Instance.new("UICorner", content).CornerRadius = UDim.new(0, 8)
+
+local pad = Instance.new("UIPadding", content)
+pad.PaddingTop = UDim.new(0, 10)
+pad.PaddingLeft = UDim.new(0, 10)
+pad.PaddingRight = UDim.new(0, 10)
+pad.PaddingBottom = UDim.new(0, 10)
+
+local vlist = Instance.new("UIListLayout", content)
+vlist.Padding = UDim.new(0, 8)
+vlist.SortOrder = Enum.SortOrder.LayoutOrder
 
 -- Footer hiển thị thông tin
 local footer = Instance.new("TextLabel")
@@ -111,62 +138,224 @@ footer.Parent = main
 -- ===== KÉO THẢ =====
 local dragging = false
 local dragStart, startPos
-
 title.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
         startPos = main.Position
     end
 end)
-
 UIS.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
-    or input.UserInputType == Enum.UserInputType.Touch) then
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragStart
-        main.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + delta.X,
-            startPos.Y.Scale, startPos.Y.Offset + delta.Y
-        )
+        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
     end
 end)
-
 UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = false
     end
 end)
 
--- ===== THU NHỎ / PHÓNG TO / THOÁT =====
+-- Thu nhỏ / Phóng to / Thoát
 local minimized = false
-local normalSize = UDim2.new(0, 260, 0, 340)
-
+local normalSize = UDim2.new(0, 280, 0, 360)
 minBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     if minimized then
+        tabBar.Visible = false
         content.Visible = false
         footer.Visible = false
-        main:TweenSize(UDim2.new(0, 260, 0, 36),
-            Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+        main:TweenSize(UDim2.new(0, 280, 0, 36), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
     else
-        main:TweenSize(normalSize,
-            Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+        main:TweenSize(normalSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
         task.wait(0.2)
+        tabBar.Visible = true
         content.Visible = true
         footer.Visible = true
     end
 end)
-
 local maximized = false
 maxBtn.MouseButton1Click:Connect(function()
     maximized = not maximized
-    local target = maximized and UDim2.new(0, 360, 0, 480) or normalSize
-    main:TweenSize(target,
-        Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
+    local target = maximized and UDim2.new(0, 380, 0, 500) or normalSize
+    main:TweenSize(target, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
 end)
-
 closeBtn.MouseButton1Click:Connect(function()
     gui:Destroy()
+end)
+
+-- ==========================================
+-- LOGIC CHỨC NĂNG TAB MAIN
+-- ==========================================
+
+-- Biến toàn cục cho Tab Main
+local scanRange = 15
+local killStates = {
+    Top = false,
+    Back = false,
+    Pro = false
+}
+local savedCFrame = nil
+local isAttacking = false
+
+-- Giao diện nhập Phạm Vi
+local rangeFrame = Instance.new("Frame")
+rangeFrame.Size = UDim2.new(1, 0, 0, 36)
+rangeFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+rangeFrame.Parent = content
+Instance.new("UICorner", rangeFrame).CornerRadius = UDim.new(0, 6)
+
+local rangeLbl = Instance.new("TextLabel")
+rangeLbl.Size = UDim2.new(0.6, 0, 1, 0)
+rangeLbl.Position = UDim2.new(0, 10, 0, 0)
+rangeLbl.BackgroundTransparency = 1
+rangeLbl.Text = "Quét Phạm Vi (Studs):"
+rangeLbl.TextColor3 = Color3.new(1,1,1)
+rangeLbl.Font = Enum.Font.Gotham
+rangeLbl.TextSize = 13
+rangeLbl.TextXAlignment = Enum.TextXAlignment.Left
+rangeLbl.Parent = rangeFrame
+
+local rangeBox = Instance.new("TextBox")
+rangeBox.Size = UDim2.new(0.3, 0, 0, 24)
+rangeBox.Position = UDim2.new(0.65, 0, 0, 6)
+rangeBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+rangeBox.Text = "15"
+rangeBox.TextColor3 = Color3.fromRGB(0, 220, 255)
+rangeBox.Font = Enum.Font.GothamBold
+rangeBox.TextSize = 13
+rangeBox.Parent = rangeFrame
+Instance.new("UICorner", rangeBox).CornerRadius = UDim.new(0, 4)
+
+rangeBox.FocusLost:Connect(function()
+    local num = tonumber(rangeBox.Text)
+    if num and num > 0 then
+        scanRange = num
+        rangeBox.Text = tostring(num)
+    else
+        rangeBox.Text = tostring(scanRange)
+    end
+end)
+
+-- Hàm tạo nút Toggle
+local function makeToggle(name, key)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 34)
+    btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    btn.Text = "  [OFF] " .. name
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 13
+    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.Parent = content
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    btn.MouseButton1Click:Connect(function()
+        killStates[key] = not killStates[key]
+        btn.BackgroundColor3 = killStates[key] and Color3.fromRGB(0, 170, 100) or Color3.fromRGB(35, 35, 45)
+        btn.Text = (killStates[key] and "  [ON] " or "  [OFF] ") .. name
+    end)
+    return btn
+end
+
+makeToggle("Kill Aura (Trên)", "Top")
+makeToggle("Kill Aura (Sau)", "Back")
+makeToggle("Kill Aura (Pro)", "Pro")
+
+-- ===== LOGIC KILL AURA =====
+local function getClosestTarget()
+    local char = player.Character
+    if not char then return nil end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    
+    local closest = nil
+    local minDist = scanRange
+    
+    for _, model in pairs(workspace:GetChildren()) do
+        if model ~= char and model:FindFirstChild("Humanoid") and model:FindFirstChild("HumanoidRootPart") then
+            local hum = model.Humanoid
+            if hum.Health > 0 then
+                -- Tránh đánh người chơi khác nếu chỉ muốn đánh NPC/Mob (có thể bỏ dòng này nếu muốn PvP)
+                if not Players:GetPlayerFromCharacter(model) then
+                    local dist = (model.HumanoidRootPart.Position - root.Position).Magnitude
+                    if dist < minDist then
+                        minDist = dist
+                        closest = model
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- Hàm đánh (Bật tool nếu có)
+local function attackTarget(hum)
+    local tool = player.Character:FindFirstChildOfClass("Tool")
+    if tool then
+        tool:Activate()
+    else
+        -- Nếu không có tool, thử dùng tay (chỉ hoạt động với game cho phép)
+        hum:TakeDamage(10) 
+    end
+end
+
+RunService.Heartbeat:Connect(function()
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+    if not root or not hum or hum.Health <= 0 then return end
+
+    -- Nếu không bật chức năng nào hoặc đang trong quá trình đánh thì bỏ qua
+    if isAttacking or (not killStates.Top and not killStates.Back and not killStates.Pro) then 
+        if not isAttacking and savedCFrame then
+            -- Trả về vị trí cũ nếu bị kẹt
+            root.CFrame = savedCFrame
+            savedCFrame = nil
+        end
+        return 
+    end
+
+    local target = getClosestTarget()
+    if target then
+        isAttacking = true
+        savedCFrame = root.CFrame -- Lưu vị trí hiện tại
+        
+        local targetRoot = target.HumanoidRootPart
+        local targetHum = target.Humanoid
+
+        if killStates.Top then
+            -- Tele lên trên
+            root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
+            task.wait(0.05)
+            attackTarget(targetHum)
+            task.wait(0.05)
+            root.CFrame = savedCFrame
+        elseif killStates.Back then
+            -- Tele ra sau lưng
+            root.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
+            task.wait(0.05)
+            attackTarget(targetHum)
+            task.wait(0.05)
+            root.CFrame = savedCFrame
+        elseif killStates.Pro then
+            -- Tele lên trên + Xoay 360 + Đánh
+            root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
+            task.wait(0.02)
+            -- Xoay 360 độ
+            for i = 1, 6 do
+                root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(60), 0)
+                task.wait(0.02)
+            end
+            attackTarget(targetHum)
+            task.wait(0.05)
+            root.CFrame = savedCFrame
+        end
+        
+        isAttacking = false
+        savedCFrame = nil
+    end
 end)
