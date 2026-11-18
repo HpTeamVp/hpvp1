@@ -381,6 +381,7 @@ gui.IgnoreGuiInset = true
 gui.Parent = lp:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
+main.Name = "Menu"
 main.Size = UDim2.fromOffset(210, 0)
 main.AutomaticSize = Enum.AutomaticSize.Y
 main.Position = UDim2.fromOffset(8, 70)
@@ -390,10 +391,16 @@ main.ZIndex = 10
 main.Parent = gui
 Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
 
+local mainLayout = Instance.new("UIListLayout")
+mainLayout.Padding = UDim.new(0, 4)
+mainLayout.SortOrder = Enum.SortOrder.LayoutOrder
+mainLayout.Parent = main
+
 local title = Instance.new("Frame")
 title.Size = UDim2.new(1, 0, 0, 32)
 title.BackgroundColor3 = Color3.fromRGB(40, 90, 200)
 title.BorderSizePixel = 0
+title.LayoutOrder = 0
 title.ZIndex = 11
 title.Parent = main
 Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
@@ -438,6 +445,7 @@ content.ScrollBarThickness = 4
 content.ScrollBarImageColor3 = Color3.fromRGB(120, 140, 220)
 content.BackgroundTransparency = 1
 content.BorderSizePixel = 0
+content.LayoutOrder = 1
 content.ZIndex = 11
 content.Parent = main
 
@@ -462,19 +470,30 @@ closeBtn.Activated:Connect(function()
 end)
 
 do
-	local dragging, startInput, startPos
+	local dragging = false
+	local dragStart, startPos
+
 	title.InputBegan:Connect(function(i)
 		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-			dragging, startInput, startPos = true, i.Position, main.Position
+			dragging = true
+			dragStart = i.Position
+			startPos = main.AbsolutePosition
 			i.Changed:Connect(function()
-				if i.UserInputState == Enum.UserInputState.End then dragging = false end
+				if i.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
 			end)
 		end
 	end)
+
 	UIS.InputChanged:Connect(function(i)
-		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-			local d = i.Position - startInput
-			main.Position = UDim2.fromOffset(startPos.X.Offset + d.X, startPos.Y.Offset + d.Y)
+		if not dragging then return end
+		if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+			local delta = i.Position - dragStart
+			main.Position = UDim2.fromOffset(
+				startPos.X + gui.AbsolutePosition.X + delta.X,
+				startPos.Y + gui.AbsolutePosition.Y + delta.Y
+			)
 		end
 	end)
 end
