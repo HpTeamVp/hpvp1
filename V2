@@ -1,366 +1,447 @@
--- LocalScript: StarterPlayerScripts
+
+-- HP TEAM PRO V1
+-- LocalScript
+-- Place in StarterPlayerScripts
+
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local player = Players.LocalPlayer
+local Lighting = game:GetService("Lighting")
 
--- ===== NHẬN DIỆN THIẾT BỊ =====
-local deviceName = "PC"
-if UIS.TouchEnabled and not UIS.KeyboardEnabled then
-    deviceName = "Mobile"
-elseif UIS.TouchEnabled and UIS.KeyboardEnabled then
-    deviceName = "Tablet"
-elseif UIS.GamepadEnabled and not UIS.KeyboardEnabled then
-    deviceName = "Console"
+local Player = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+local Purple = Color3.fromRGB(155, 75, 255)
+local Dark = Color3.fromRGB(23, 18, 32)
+local White = Color3.fromRGB(245, 240, 255)
+
+local Speed = 16
+local Fly = false
+local Noclip = false
+local ESP = false
+local LineESP = false
+local BoxESP = false
+local HealthESP = false
+local DistanceESP = false
+local AirJump = false
+
+local Character, Humanoid, Root
+
+local function SetupCharacter(char)
+    Character = char
+    Humanoid = char:WaitForChild("Humanoid")
+    Root = char:WaitForChild("HumanoidRootPart")
 end
 
--- ===== TẠO GUI =====
-local gui = Instance.new("ScreenGui")
-gui.Name = "HpTeamVpPro"
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = player:WaitForChild("PlayerGui")
+if Player.Character then
+    SetupCharacter(Player.Character)
+end
 
-local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 280, 0, 360)
-main.Position = UDim2.new(0, 40, 0, 60)
-main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-main.BorderSizePixel = 0
-main.Active = true
-main.ClipsDescendants = true
-main.Parent = gui
+Player.CharacterAdded:Connect(SetupCharacter)
 
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
-local stroke = Instance.new("UIStroke", main)
-stroke.Color = Color3.fromRGB(0, 200, 255)
-stroke.Thickness = 1.5
+-- GUI
 
--- Tiêu đề
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 36)
-title.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
-title.BorderSizePixel = 0
-title.Text = "  Hp Team Vp Pro"
-title.TextColor3 = Color3.new(1,1,1)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 15
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Parent = main
-Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
+local GUI = Instance.new("ScreenGui")
+GUI.Name = "HP_TEAM_PRO_V1"
+GUI.ResetOnSpawn = false
+GUI.Parent = Player:WaitForChild("PlayerGui")
 
--- Nút thu nhỏ
-local minBtn = Instance.new("TextButton")
-minBtn.Size = UDim2.new(0, 28, 0, 28)
-minBtn.Position = UDim2.new(1, -90, 0, 4)
-minBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
-minBtn.Text = "—"
-minBtn.TextColor3 = Color3.new(0,0,0)
-minBtn.Font = Enum.Font.GothamBold
-minBtn.Parent = main
-Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+local Main = Instance.new("Frame")
+Main.Size = UDim2.fromOffset(310, 390)
+Main.Position = UDim2.new(.5, -155, .5, -195)
+Main.BackgroundColor3 = Dark
+Main.Parent = GUI
 
--- Nút phóng to
-local maxBtn = Instance.new("TextButton")
-maxBtn.Size = UDim2.new(0, 28, 0, 28)
-maxBtn.Position = UDim2.new(1, -60, 0, 4)
-maxBtn.BackgroundColor3 = Color3.fromRGB(0, 220, 120)
-maxBtn.Text = "□"
-maxBtn.TextColor3 = Color3.new(0,0,0)
-maxBtn.Font = Enum.Font.GothamBold
-maxBtn.Parent = main
-Instance.new("UICorner", maxBtn).CornerRadius = UDim.new(0, 6)
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
 
--- Nút thoát
-local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.new(0, 28, 0, 28)
-closeBtn.Position = UDim2.new(1, -30, 0, 4)
-closeBtn.BackgroundColor3 = Color3.fromRGB(230, 60, 60)
-closeBtn.Text = "X"
-closeBtn.TextColor3 = Color3.new(1,1,1)
-closeBtn.Font = Enum.Font.GothamBold
-closeBtn.Parent = main
-Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+local Stroke = Instance.new("UIStroke", Main)
+Stroke.Color = Purple
+Stroke.Thickness = 2
 
--- Thanh Tab
-local tabBar = Instance.new("Frame")
-tabBar.Size = UDim2.new(1, -16, 0, 32)
-tabBar.Position = UDim2.new(0, 8, 0, 42)
-tabBar.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-tabBar.BorderSizePixel = 0
-tabBar.Parent = main
-Instance.new("UICorner", tabBar).CornerRadius = UDim.new(0, 6)
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 48)
+Header.BackgroundColor3 = Color3.fromRGB(47, 25, 69)
+Header.Parent = Main
 
-local tabMainBtn = Instance.new("TextButton")
-tabMainBtn.Size = UDim2.new(1, 0, 1, 0)
-tabMainBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
-tabMainBtn.Text = "Main"
-tabMainBtn.TextColor3 = Color3.new(1,1,1)
-tabMainBtn.Font = Enum.Font.GothamBold
-tabMainBtn.TextSize = 14
-tabMainBtn.Parent = tabBar
-Instance.new("UICorner", tabMainBtn).CornerRadius = UDim.new(0, 6)
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 12)
 
--- Vùng chứa nội dung
-local content = Instance.new("ScrollingFrame")
-content.Size = UDim2.new(1, -16, 1, -132)
-content.Position = UDim2.new(0, 8, 0, 80)
-content.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
-content.BorderSizePixel = 0
-content.CanvasSize = UDim2.new(0, 0, 0, 0)
-content.AutomaticCanvasSize = Enum.AutomaticSize.Y
-content.ScrollBarThickness = 4
-content.Parent = main
-Instance.new("UICorner", content).CornerRadius = UDim.new(0, 8)
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -100, 1, 0)
+Title.Position = UDim2.fromOffset(12, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "♛ HP TEAM PRO V1"
+Title.TextColor3 = White
+Title.TextSize = 17
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
 
-local pad = Instance.new("UIPadding", content)
-pad.PaddingTop = UDim.new(0, 10)
-pad.PaddingLeft = UDim.new(0, 10)
-pad.PaddingRight = UDim.new(0, 10)
-pad.PaddingBottom = UDim.new(0, 10)
+local function MakeButton(parent, text, pos, size)
+    local B = Instance.new("TextButton")
+    B.Size = size
+    B.Position = pos
+    B.BackgroundColor3 = Color3.fromRGB(48, 34, 62)
+    B.TextColor3 = White
+    B.Text = text
+    B.TextSize = 13
+    B.Font = Enum.Font.GothamBold
+    B.Parent = parent
+    Instance.new("UICorner", B).CornerRadius = UDim.new(0, 7)
+    return B
+end
 
-local vlist = Instance.new("UIListLayout", content)
-vlist.Padding = UDim.new(0, 8)
-vlist.SortOrder = Enum.SortOrder.LayoutOrder
+local Min = MakeButton(Header, "-", UDim2.new(1, -76, 0, 7),
+    UDim2.fromOffset(30, 32))
 
--- Footer hiển thị thông tin
-local footer = Instance.new("TextLabel")
-footer.Size = UDim2.new(1, -16, 0, 36)
-footer.Position = UDim2.new(0, 8, 1, -44)
-footer.BackgroundTransparency = 1
-footer.Text = "Hp Team Pro - Script 1.0.0.1\nThiết Bị: " .. deviceName
-footer.TextColor3 = Color3.fromRGB(160, 160, 170)
-footer.Font = Enum.Font.Code
-footer.TextSize = 12
-footer.TextYAlignment = Enum.TextYAlignment.Center
-footer.Parent = main
+local Close = MakeButton(Header, "X", UDim2.new(1, -39, 0, 7),
+    UDim2.fromOffset(30, 32))
 
--- ===== KÉO THẢ =====
+local Content = Instance.new("Frame")
+Content.Position = UDim2.fromOffset(8, 100)
+Content.Size = UDim2.new(1, -16, 1, -108)
+Content.BackgroundTransparency = 1
+Content.Parent = Main
+
+local Tabs = Instance.new("Frame")
+Tabs.Position = UDim2.fromOffset(8, 54)
+Tabs.Size = UDim2.new(1, -16, 0, 38)
+Tabs.BackgroundTransparency = 1
+Tabs.Parent = Main
+
+local CurrentTab = "MAIN"
+local Buttons = {}
+
+local function ClearContent()
+    for _, v in ipairs(Content:GetChildren()) do
+        v:Destroy()
+    end
+end
+
+local function AddToggle(name, callback)
+    local B = MakeButton(
+        Content,
+        name .. " : OFF",
+        UDim2.new(0, 0, 0, #Buttons * 43),
+        UDim2.new(1, 0, 0, 36)
+    )
+
+    local state = false
+
+    B.MouseButton1Click:Connect(function()
+        state = not state
+        B.Text = name .. (state and " : ON" or " : OFF")
+        B.BackgroundColor3 = state and Purple
+            or Color3.fromRGB(48, 34, 62)
+        callback(state)
+    end)
+
+    table.insert(Buttons, B)
+end
+
+local function RenderTab(tab)
+    CurrentTab = tab
+    Buttons = {}
+    ClearContent()
+
+    if tab == "MAIN" then
+        AddToggle("Tele Kill (chưa hỗ trợ)", function()
+        end)
+
+        AddToggle("Aim Súng (chưa hỗ trợ)", function()
+        end)
+
+        AddToggle("Hút vật phẩm (chưa hỗ trợ)", function()
+        end)
+
+        AddToggle("Né Attack (chưa hỗ trợ)", function()
+        end)
+
+    elseif tab == "ESP" then
+
+        AddToggle("ESP Line", function(v)
+            LineESP = v
+        end)
+
+        AddToggle("ESP Box", function(v)
+            BoxESP = v
+        end)
+
+        AddToggle("ESP Health", function(v)
+            HealthESP = v
+        end)
+
+        AddToggle("ESP Distance", function(v)
+            DistanceESP = v
+        end)
+
+    elseif tab == "KHÁC" then
+
+        AddToggle("Air Jump", function(v)
+            AirJump = v
+        end)
+
+        AddToggle("Fly Air", function(v)
+            Fly = v
+        end)
+
+        AddToggle("No Clip", function(v)
+            Noclip = v
+        end)
+
+        AddToggle("Speed", function(v)
+            Speed = v and 40 or 16
+            if Humanoid then
+                Humanoid.WalkSpeed = Speed
+            end
+        end)
+    end
+end
+
+local function AddTab(name, pos)
+    local B = MakeButton(
+        Tabs,
+        name,
+        UDim2.new(pos, 0, 0, 0),
+        UDim2.new(1/3, -4, 1, 0)
+    )
+
+    B.MouseButton1Click:Connect(function()
+        RenderTab(name)
+    end)
+end
+
+AddTab("MAIN", 0)
+AddTab("ESP", 1/3)
+AddTab("KHÁC", 2/3)
+
+RenderTab("MAIN")
+
+-- MINIMIZE
+
+local minimized = false
+
+Min.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    Content.Visible = not minimized
+    Tabs.Visible = not minimized
+    Main.Size = minimized
+        and UDim2.fromOffset(310, 48)
+        or UDim2.fromOffset(310, 390)
+end)
+
+Close.MouseButton1Click:Connect(function()
+    Fly = false
+    Noclip = false
+    GUI:Destroy()
+end)
+
+-- DRAG MOBILE + PC
+
 local dragging = false
 local dragStart, startPos
-title.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
         dragging = true
         dragStart = input.Position
-        startPos = main.Position
+        startPos = Main.Position
     end
 end)
+
 UIS.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+    if dragging and (
+        input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch
+    ) then
         local delta = input.Position - dragStart
-        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        Main.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
     end
 end)
+
 UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
         dragging = false
     end
 end)
 
--- Thu nhỏ / Phóng to / Thoát
-local minimized = false
-local normalSize = UDim2.new(0, 280, 0, 360)
-minBtn.MouseButton1Click:Connect(function()
-    minimized = not minimized
-    if minimized then
-        tabBar.Visible = false
-        content.Visible = false
-        footer.Visible = false
-        main:TweenSize(UDim2.new(0, 280, 0, 36), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
-    else
-        main:TweenSize(normalSize, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
-        task.wait(0.2)
-        tabBar.Visible = true
-        content.Visible = true
-        footer.Visible = true
-    end
-end)
-local maximized = false
-maxBtn.MouseButton1Click:Connect(function()
-    maximized = not maximized
-    local target = maximized and UDim2.new(0, 380, 0, 500) or normalSize
-    main:TweenSize(target, Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.2, true)
-end)
-closeBtn.MouseButton1Click:Connect(function()
-    gui:Destroy()
-end)
+-- AIR JUMP
 
-
--- ==========================================
--- LOGIC CHỨC NĂNG TAB MAIN (TỰ ĐỘNG ĐÁNH)
--- ==========================================
-
-local scanRange = 15
-local killStates = { Top = false, Back = false, Pro = false }
-local savedCFrame = nil
-local isAttacking = false
-
--- Giao diện nhập Phạm Vi
-local rangeFrame = Instance.new("Frame")
-rangeFrame.Size = UDim2.new(1, 0, 0, 36)
-rangeFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-rangeFrame.Parent = content
-Instance.new("UICorner", rangeFrame).CornerRadius = UDim.new(0, 6)
-
-local rangeLbl = Instance.new("TextLabel")
-rangeLbl.Size = UDim2.new(0.6, 0, 1, 0)
-rangeLbl.Position = UDim2.new(0, 10, 0, 0)
-rangeLbl.BackgroundTransparency = 1
-rangeLbl.Text = "Quét Phạm Vi (Studs):"
-rangeLbl.TextColor3 = Color3.new(1,1,1)
-rangeLbl.Font = Enum.Font.Gotham
-rangeLbl.TextSize = 13
-rangeLbl.TextXAlignment = Enum.TextXAlignment.Left
-rangeLbl.Parent = rangeFrame
-
-local rangeBox = Instance.new("TextBox")
-rangeBox.Size = UDim2.new(0.3, 0, 0, 24)
-rangeBox.Position = UDim2.new(0.65, 0, 0, 6)
-rangeBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-rangeBox.Text = "15"
-rangeBox.TextColor3 = Color3.fromRGB(0, 220, 255)
-rangeBox.Font = Enum.Font.GothamBold
-rangeBox.TextSize = 13
-rangeBox.Parent = rangeFrame
-Instance.new("UICorner", rangeBox).CornerRadius = UDim.new(0, 4)
-
-rangeBox.FocusLost:Connect(function()
-    local num = tonumber(rangeBox.Text)
-    if num and num > 0 then
-        scanRange = num
-        rangeBox.Text = tostring(num)
-    else
-        rangeBox.Text = tostring(scanRange)
+UIS.JumpRequest:Connect(function()
+    if AirJump and Humanoid then
+        Humanoid:ChangeState(
+            Enum.HumanoidStateType.Jumping
+        )
     end
 end)
 
--- Hàm tạo nút Toggle
-local function makeToggle(name, key)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 34)
-    btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
-    btn.Text = "  [OFF] " .. name
-    btn.TextColor3 = Color3.new(1,1,1)
-    btn.Font = Enum.Font.Gotham
-    btn.TextSize = 13
-    btn.TextXAlignment = Enum.TextXAlignment.Left
-    btn.Parent = content
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+-- FLY: HOLD POSITION
 
-    btn.MouseButton1Click:Connect(function()
-        killStates[key] = not killStates[key]
-        btn.BackgroundColor3 = killStates[key] and Color3.fromRGB(0, 170, 100) or Color3.fromRGB(35, 35, 45)
-        btn.Text = (killStates[key] and "  [ON] " or "  [OFF] ") .. name
+local FlyPosition
+local FlyGyro
+
+RunService.Heartbeat:Connect(function()
+    if not Root or not Humanoid then return end
+
+    if Noclip then
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end
+
+    if Fly then
+        if not FlyPosition then
+            FlyPosition = Instance.new("BodyPosition")
+            FlyPosition.MaxForce = Vector3.new(
+                1000000, 1000000, 1000000
+            )
+            FlyPosition.P = 30000
+            FlyPosition.Position = Root.Position
+            FlyPosition.Parent = Root
+
+            FlyGyro = Instance.new("BodyGyro")
+            FlyGyro.MaxTorque = Vector3.new(
+                1000000, 1000000, 1000000
+            )
+            FlyGyro.Parent = Root
+        end
+
+        Humanoid:ChangeState(
+            Enum.HumanoidStateType.Physics
+        )
+
+        FlyGyro.CFrame = Camera.CFrame
+        FlyPosition.Position = Root.Position
+    else
+        if FlyPosition then
+            FlyPosition:Destroy()
+            FlyPosition = nil
+        end
+
+        if FlyGyro then
+            FlyGyro:Destroy()
+            FlyGyro = nil
+        end
+    end
+end)
+
+-- ESP NPC
+
+local ESPFolder = Instance.new("Folder")
+ESPFolder.Name = "HP_TEAM_ESP"
+ESPFolder.Parent = GUI
+
+local ESPObjects = {}
+
+local function RemoveESP(model)
+    if ESPObjects[model] then
+        ESPObjects[model]:Destroy()
+        ESPObjects[model] = nil
+    end
+end
+
+local function CreateESP(model)
+    if ESPObjects[model] then return end
+
+    if not model:IsA("Model") then return end
+    if Players:GetPlayerFromCharacter(model) then return end
+
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    local part = model:FindFirstChild("HumanoidRootPart")
+        or model:FindFirstChildWhichIsA("BasePart")
+
+    if not hum or not part then return end
+
+    local highlight = Instance.new("Highlight")
+    highlight.Adornee = model
+    highlight.FillTransparency = 1
+    highlight.OutlineColor = Purple
+    highlight.Parent = ESPFolder
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Adornee = part
+    billboard.Size = UDim2.fromOffset(150, 55)
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Parent = ESPFolder
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = White
+    label.TextStrokeTransparency = 0
+    label.TextSize = 12
+    label.Font = Enum.Font.GothamBold
+    label.Parent = billboard
+
+    ESPObjects[model] = Instance.new("Folder")
+    ESPObjects[model].Parent = ESPFolder
+    highlight.Parent = ESPObjects[model]
+    billboard.Parent = ESPObjects[model]
+
+    ESPObjects[model]:SetAttribute("Highlight", true)
+
+    local connection
+    connection = RunService.RenderStepped:Connect(function()
+        if not model.Parent or not ESP then
+            connection:Disconnect()
+            RemoveESP(model)
+            return
+        end
+
+        local distance = (Camera.CFrame.Position - part.Position).Magnitude
+
+        if distance > 150 then
+            billboard.Enabled = false
+            highlight.Enabled = false
+            return
+        end
+
+        billboard.Enabled = true
+        highlight.Enabled = BoxESP
+
+        local text = model.Name
+
+        if HealthESP then
+            text = text .. "\nHP: " ..
+                math.floor(hum.Health) .. "/" ..
+                math.floor(hum.MaxHealth)
+        end
+
+        if DistanceESP then
+            text = text .. "\n" ..
+                math.floor(distance) .. " studs"
+        end
+
+        label.Text = text
     end)
-    return btn
 end
 
-makeToggle("Kill Aura (Trên)", "Top")
-makeToggle("Kill Aura (Sau)", "Back")
-makeToggle("Kill Aura (Pro)", "Pro")
-
--- Tìm quái gần nhất
-local function getClosestTarget()
-    local char = player.Character
-    if not char then return nil end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return nil end
-    
-    local closest = nil
-    local minDist = scanRange
-    
-    for _, model in pairs(workspace:GetChildren()) do
-        if model ~= char and model:FindFirstChild("Humanoid") and model:FindFirstChild("HumanoidRootPart") then
-            local hum = model.Humanoid
-            if hum.Health > 0 then
-                if not Players:GetPlayerFromCharacter(model) then -- Bỏ dòng này nếu muốn đánh cả người
-                    local dist = (model.HumanoidRootPart.Position - root.Position).Magnitude
-                    if dist < minDist then
-                        minDist = dist
-                        closest = model
-                    end
-                end
-            end
+RunService.Heartbeat:Connect(function()
+    if not ESP and not LineESP and not BoxESP
+        and not HealthESP and not DistanceESP then
+        for model in pairs(ESPObjects) do
+            RemoveESP(model)
         end
+        return
     end
-    return closest
-end
 
--- HÀM TỰ ĐỘNG ĐÁNH (Kích hoạt Tool hoặc Click chuột)
-local function autoAttack()
-    -- 1. Nếu đang cầm Tool thì kích hoạt Tool
-    local char = player.Character
-    local tool = char and char:FindFirstChildOfClass("Tool")
-    if tool then
-        tool:Activate()
-    end
-    
-    -- 2. Giả lập Click chuột trái (nếu game dùng click để đánh)
-    local mouse = player:GetMouse()
-    if mouse then
-        -- Gửi tín hiệu click
-        local click = Instance.new("ClickDetector") -- Dummy trick to trigger mouse event, or use VirtualInputManager if you have Synapse/Delta
-        -- Vì Roblox chặn việc tự click trong game thường, nên cách tốt nhất là dùng Tool.
-        -- Nếu bạn chạy Executor, có thể dùng `VirtualInputManager:SendMouseButtonEvent()`
-    end
-end
+    ESP = LineESP or BoxESP or HealthESP or DistanceESP
 
--- Vòng lặp chính (Dùng task.spawn để không treo Heartbeat)
-task.spawn(function()
-    while task.wait(0.1) do
-        local char = player.Character
-        if not char then continue end
-        local root = char:FindFirstChild("HumanoidRootPart")
-        local hum = char:FindFirstChild("Humanoid")
-        if not root or not hum or hum.Health <= 0 then continue end
-
-        -- Nếu không bật gì thì trả về vị trí cũ (nếu đang kẹt)
-        if isAttacking or (not killStates.Top and not killStates.Back and not killStates.Pro) then 
-            if not isAttacking and savedCFrame then
-                root.CFrame = savedCFrame
-                savedCFrame = nil
-            end
-            continue 
-        end
-
-        local target = getClosestTarget()
-        if target then
-            isAttacking = true
-            savedCFrame = root.CFrame
-            
-            local targetRoot = target.HumanoidRootPart
-            local targetHum = target.Humanoid
-
-            -- Thực hiện Tele và Đánh
-            if killStates.Top then
-                root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
-                task.wait(0.05)
-                autoAttack() -- Gọi tự động đánh
-                task.wait(0.05)
-                root.CFrame = savedCFrame
-                
-            elseif killStates.Back then
-                root.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
-                task.wait(0.05)
-                autoAttack()
-                task.wait(0.05)
-                root.CFrame = savedCFrame
-                
-            elseif killStates.Pro then
-                root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
-                task.wait(0.02)
-                -- Xoay 360 độ
-                for i = 1, 6 do
-                    root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(60), 0)
-                    task.wait(0.02)
-                end
-                autoAttack()
-                task.wait(0.05)
-                root.CFrame = savedCFrame
-            end
-            
-            isAttacking = false
-            savedCFrame = nil
+    for _, model in ipairs(workspace:GetDescendants()) do
+        if model:IsA("Model")
+            and model:FindFirstChildOfClass("Humanoid") then
+            CreateESP(model)
         end
     end
 end)
+
+print("HP TEAM PRO V1 LOADED")
