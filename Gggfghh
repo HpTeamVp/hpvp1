@@ -14,7 +14,7 @@ local State = {
 	Line = false, Box = false, Health = false,
 	SpeedValue = 80,
 	AuraRange = 150,
-	AutoFarm = false,
+	AuraHitDelay = 0.05,
 	AutoChest = false,
 	AutoEat = false,
 	GodMode = false,
@@ -211,6 +211,7 @@ end
 -- Kill Aura nằm trên cùng
 addToggle("KillAura", "Kill Aura")
 addInput("Tầm quét:", "AuraRange", 10, 1000)
+addInput("Tốc đánh (s):", "AuraHitDelay", 0.01, 1)
 
 local statusLabel = Instance.new("TextLabel")
 statusLabel.Size = UDim2.new(1, 0, 0, 20)
@@ -231,11 +232,11 @@ addToggle("Line", "ESP Line")
 addToggle("Box", "ESP Box")
 addToggle("Health", "ESP Máu")
 
--- ===== Chức năng mới: Auto Farm / Chest / Eat / GodMode =====
-addToggle("AutoFarm", "Auto Farm")
+-- ===== Chức năng mới =====
 addToggle("AutoChest", "Auto Chest")
 addToggle("AutoEat", "Auto Eat")
 addToggle("GodMode", "God Mode")
+
 -- ===== Nhân vật =====
 local function getChar()
 	local c = lp.Character
@@ -310,7 +311,7 @@ RunService.Heartbeat:Connect(function()
 
 	wasNoclip = State.Noclip
 
-	-- God Mode: ghi đè máu mỗi frame
+	-- God Mode
 	if State.GodMode then
 		if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
 		if char:GetAttribute("Dead") then char:SetAttribute("Dead", false) end
@@ -602,6 +603,7 @@ task.spawn(function()
 			for _, part in ipairs(char:GetDescendants()) do
 				if part:IsA("BasePart") then part.CanCollide = false end
 			end
+			hum.PlatformStand = true
 
 			while State.KillAura
 				and mh.Health > 0
@@ -609,6 +611,11 @@ task.spawn(function()
 				and hum.Health > 0
 				and os.clock() - t0 < AURA_TIMEOUT do
 
+				-- Giữ máu full trong lúc đánh, mob không giết được
+				if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
+				if char:GetAttribute("Dead") then char:SetAttribute("Dead", false) end
+
+				-- Teleport sau lưng mob, quay mặt vào mob
 				local target = mr.CFrame * CFrame.new(0, 0, 3)
 				root.CFrame = CFrame.lookAt(target.Position, Vector3.new(mr.Position.X, target.Position.Y, mr.Position.Z))
 				root.AssemblyLinearVelocity = Vector3.zero
@@ -616,14 +623,16 @@ task.spawn(function()
 				local tool = getTool(hum)
 				if tool then tool:Activate() end
 
-				task.wait(0.05)
+				task.wait(State.AuraHitDelay or 0.05)
 			end
 		end)
 
+		-- Về chỗ cũ
 		local c2, h2, r2 = getChar()
 		if c2 and r2 then
 			r2.CFrame = home
 			r2.AssemblyLinearVelocity = Vector3.zero
+			if h2 then h2.PlatformStand = false end
 			if not State.Noclip then
 				for _, part in ipairs(c2:GetDescendants()) do
 					if part:IsA("BasePart") and SOLID[part.Name] then part.CanCollide = true end
@@ -635,68 +644,59 @@ task.spawn(function()
 	end
 end)
 
--- ===== Auto Farm =====
-task.spawn(function()
-	while true do
-		task.wait(0.35)
-		if not State.AutoFarm then continue end
-
-		local char, hum, root = getChar()
-		if not char or hum.Health <= 0 then continue end
-
-		local best, bestDist
-		for model in pairs(tracked) do
-			local mh = model:FindFirstChildOfClass("Humanoid")
-			local mr = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-			if mh and mr and mh.Health > 0 and model:IsDescendantOf(Workspace) then
-				local d = (mr.Position - root.Position).Magnitude
-				if not bestDist or d < bestDist then best, bestDist = mr, d end
-			end
-		end
-
-		if best and State.AutoFarm then
-			if bestDist and bestDist > 8 then
-				root.CFrame = best.CFrame + Vector3.new(0, 2, 0)
-				task.wait(0.15)
-			end
-			local tool = getTool(hum)
-			if tool then tool:Activate() end
-		end
-	end
-end)
-
 -- ===== Auto Chest =====
 local CHEST_NAMES = {
-	Chest = true, SmallChest_Survivor = true, LargeChest_Survivor = true,
-	TreasureChest_01 = true, TreasureChest_02 = true,
-	["Fishermans Chest"] = true, ["Warrior Chest"] = true, ["Pirate Chest"] = true,
-	MagmaChest = true, FrostChest = true, AlienChest = true, GhostChest = true,
-	LargeLogChest = true, SmallLogChest = true, QuestChest = true,
-	ModernChest_Large = true, ModernSmallChest = true, TreasureIslandChest = true,
-	Box = true,
+	"Chest", "SmallChest_Survivor", "LargeChest_Survivor",
+	"TreasureChest_01", "TreasureChest_02",
+	"Fishermans Chest", "Warrior Chest", "Pirate Chest",
+	"MagmaChest", "FrostChest", "AlienChest", "GhostChest",
+	"LargeLogChest", "SmallLogChest", "QuestChest",
+	"ModernChest_Large", "ModernSmallChest", "TreasureIslandChest",
+	"Box",
 }
+local CHEST_SET = {}
+for _, n in ipairs(CHEST_NAMES) do CHEST_SET[n] = true end
+
+local function GetModelRoot(model)
+	return model:FindFirstChild("HumanoidRootPart")
+		or model.PrimaryPart
+		or model:FindFirstChildWhichIsA("BasePart")
+end
 
 task.spawn(function()
 	while true do
-		task.wait(0.6)
+		task.wait(0.3)
 		if not State.AutoChest then continue end
 
 		local char, hum, root = getChar()
-		if not char or hum.Health <= 0 then continue end
+		if not char or hum.Health <= 0 then task.wait(1) continue end
 
-		local bestChest, bestDist, bestPrompt
-		for _, obj in ipairs(Workspace:GetDescendants()) do
+		local bestChest, bestDist, bestPrompt = nil, math.huge, nil
+		local searchIn = {}
+		local chestsFolder = Workspace:FindFirstChild("Chests")
+		if chestsFolder then
+			for _, obj in ipairs(chestsFolder:GetChildren()) do
+				table.insert(searchIn, obj)
+			end
+		end
+		for _, obj in ipairs(Workspace:GetChildren()) do
+			if obj:IsA("Model") and CHEST_SET[obj.Name] then
+				table.insert(searchIn, obj)
+			end
+		end
+
+		for _, obj in ipairs(searchIn) do
 			if not State.AutoChest then break end
-			if obj:IsA("Model") and CHEST_NAMES[obj.Name] then
+			if obj:IsA("Model") and CHEST_SET[obj.Name] then
 				local prompt
 				for _, d in ipairs(obj:GetDescendants()) do
 					if d:IsA("ProximityPrompt") and d.Enabled then prompt = d break end
 				end
 				if prompt then
-					local mr = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+					local mr = GetModelRoot(obj)
 					if mr then
 						local d = (mr.Position - root.Position).Magnitude
-						if not bestDist or d < bestDist then
+						if d < bestDist then
 							bestChest, bestDist, bestPrompt = mr, d, prompt
 						end
 					end
@@ -707,10 +707,12 @@ task.spawn(function()
 		if bestChest and bestPrompt and State.AutoChest then
 			root.CFrame = bestChest.CFrame + Vector3.new(0, 2, 0)
 			task.wait(0.3)
-			if State.AutoChest and bestPrompt.Parent then
+			if State.AutoChest and bestPrompt and bestPrompt.Parent then
 				fireproximityprompt(bestPrompt)
 			end
 			task.wait(0.6)
+		else
+			task.wait(1.5)
 		end
 	end
 end)
