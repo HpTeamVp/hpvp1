@@ -23,7 +23,7 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 280, 0, 360) -- Tăng nhẹ chiều rộng để chứa chữ
+main.Size = UDim2.new(0, 280, 0, 360)
 main.Position = UDim2.new(0, 40, 0, 60)
 main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
 main.BorderSizePixel = 0
@@ -185,17 +185,13 @@ closeBtn.MouseButton1Click:Connect(function()
     gui:Destroy()
 end)
 
+
 -- ==========================================
--- LOGIC CHỨC NĂNG TAB MAIN
+-- LOGIC CHỨC NĂNG TAB MAIN (TỰ ĐỘNG ĐÁNH)
 -- ==========================================
 
--- Biến toàn cục cho Tab Main
 local scanRange = 15
-local killStates = {
-    Top = false,
-    Back = false,
-    Pro = false
-}
+local killStates = { Top = false, Back = false, Pro = false }
 local savedCFrame = nil
 local isAttacking = false
 
@@ -263,7 +259,7 @@ makeToggle("Kill Aura (Trên)", "Top")
 makeToggle("Kill Aura (Sau)", "Back")
 makeToggle("Kill Aura (Pro)", "Pro")
 
--- ===== LOGIC KILL AURA =====
+-- Tìm quái gần nhất
 local function getClosestTarget()
     local char = player.Character
     if not char then return nil end
@@ -277,8 +273,7 @@ local function getClosestTarget()
         if model ~= char and model:FindFirstChild("Humanoid") and model:FindFirstChild("HumanoidRootPart") then
             local hum = model.Humanoid
             if hum.Health > 0 then
-                -- Tránh đánh người chơi khác nếu chỉ muốn đánh NPC/Mob (có thể bỏ dòng này nếu muốn PvP)
-                if not Players:GetPlayerFromCharacter(model) then
+                if not Players:GetPlayerFromCharacter(model) then -- Bỏ dòng này nếu muốn đánh cả người
                     local dist = (model.HumanoidRootPart.Position - root.Position).Magnitude
                     if dist < minDist then
                         minDist = dist
@@ -291,71 +286,81 @@ local function getClosestTarget()
     return closest
 end
 
--- Hàm đánh (Bật tool nếu có)
-local function attackTarget(hum)
-    local tool = player.Character:FindFirstChildOfClass("Tool")
+-- HÀM TỰ ĐỘNG ĐÁNH (Kích hoạt Tool hoặc Click chuột)
+local function autoAttack()
+    -- 1. Nếu đang cầm Tool thì kích hoạt Tool
+    local char = player.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
     if tool then
         tool:Activate()
-    else
-        -- Nếu không có tool, thử dùng tay (chỉ hoạt động với game cho phép)
-        hum:TakeDamage(10) 
+    end
+    
+    -- 2. Giả lập Click chuột trái (nếu game dùng click để đánh)
+    local mouse = player:GetMouse()
+    if mouse then
+        -- Gửi tín hiệu click
+        local click = Instance.new("ClickDetector") -- Dummy trick to trigger mouse event, or use VirtualInputManager if you have Synapse/Delta
+        -- Vì Roblox chặn việc tự click trong game thường, nên cách tốt nhất là dùng Tool.
+        -- Nếu bạn chạy Executor, có thể dùng `VirtualInputManager:SendMouseButtonEvent()`
     end
 end
 
-RunService.Heartbeat:Connect(function()
-    local char = player.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChild("Humanoid")
-    if not root or not hum or hum.Health <= 0 then return end
+-- Vòng lặp chính (Dùng task.spawn để không treo Heartbeat)
+task.spawn(function()
+    while task.wait(0.1) do
+        local char = player.Character
+        if not char then continue end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChild("Humanoid")
+        if not root or not hum or hum.Health <= 0 then continue end
 
-    -- Nếu không bật chức năng nào hoặc đang trong quá trình đánh thì bỏ qua
-    if isAttacking or (not killStates.Top and not killStates.Back and not killStates.Pro) then 
-        if not isAttacking and savedCFrame then
-            -- Trả về vị trí cũ nếu bị kẹt
-            root.CFrame = savedCFrame
+        -- Nếu không bật gì thì trả về vị trí cũ (nếu đang kẹt)
+        if isAttacking or (not killStates.Top and not killStates.Back and not killStates.Pro) then 
+            if not isAttacking and savedCFrame then
+                root.CFrame = savedCFrame
+                savedCFrame = nil
+            end
+            continue 
+        end
+
+        local target = getClosestTarget()
+        if target then
+            isAttacking = true
+            savedCFrame = root.CFrame
+            
+            local targetRoot = target.HumanoidRootPart
+            local targetHum = target.Humanoid
+
+            -- Thực hiện Tele và Đánh
+            if killStates.Top then
+                root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
+                task.wait(0.05)
+                autoAttack() -- Gọi tự động đánh
+                task.wait(0.05)
+                root.CFrame = savedCFrame
+                
+            elseif killStates.Back then
+                root.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
+                task.wait(0.05)
+                autoAttack()
+                task.wait(0.05)
+                root.CFrame = savedCFrame
+                
+            elseif killStates.Pro then
+                root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
+                task.wait(0.02)
+                -- Xoay 360 độ
+                for i = 1, 6 do
+                    root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(60), 0)
+                    task.wait(0.02)
+                end
+                autoAttack()
+                task.wait(0.05)
+                root.CFrame = savedCFrame
+            end
+            
+            isAttacking = false
             savedCFrame = nil
         end
-        return 
-    end
-
-    local target = getClosestTarget()
-    if target then
-        isAttacking = true
-        savedCFrame = root.CFrame -- Lưu vị trí hiện tại
-        
-        local targetRoot = target.HumanoidRootPart
-        local targetHum = target.Humanoid
-
-        if killStates.Top then
-            -- Tele lên trên
-            root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
-            task.wait(0.05)
-            attackTarget(targetHum)
-            task.wait(0.05)
-            root.CFrame = savedCFrame
-        elseif killStates.Back then
-            -- Tele ra sau lưng
-            root.CFrame = targetRoot.CFrame * CFrame.new(0, 0, 3)
-            task.wait(0.05)
-            attackTarget(targetHum)
-            task.wait(0.05)
-            root.CFrame = savedCFrame
-        elseif killStates.Pro then
-            -- Tele lên trên + Xoay 360 + Đánh
-            root.CFrame = targetRoot.CFrame * CFrame.new(0, 3, 0)
-            task.wait(0.02)
-            -- Xoay 360 độ
-            for i = 1, 6 do
-                root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(60), 0)
-                task.wait(0.02)
-            end
-            attackTarget(targetHum)
-            task.wait(0.05)
-            root.CFrame = savedCFrame
-        end
-        
-        isAttacking = false
-        savedCFrame = nil
     end
 end)
