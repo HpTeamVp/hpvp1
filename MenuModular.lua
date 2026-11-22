@@ -39,7 +39,7 @@ end
 local State = {
 	Flags = {}, Listeners = {}, OnChanged = {},
 	Config = { ScanRange = 150, SafeHeight = 12, DroneHeight = 6, FlySpeed = 50,
-		WalkSpeed = 32, HitboxSize = 15, AimSmooth = 0.35 },
+		WalkSpeed = 32, HitboxSize = 15, WeaponReach = 15, AimSmooth = 0.35 },
 }
 function State:Get(k) return self.Flags[k] == true end
 function State:Set(k, v)
@@ -178,7 +178,7 @@ Feature("Hitbox", function(m)
 	local snap = setmetatable({}, { __mode = "k" })
 	local function restore(p)
 		local s = snap[p]
-		if s and p.Parent then p.Size, p.Transparency, p.CanCollide = s.S, s.T, s.C end
+		if s and p.Parent then p.Size, p.Transparency, p.CanCollide, p.Massless = s.S, s.T, s.C, s.M end
 		snap[p] = nil
 	end
 	m:Give(function() for p in pairs(snap) do restore(p) end end)
@@ -187,9 +187,28 @@ Feature("Hitbox", function(m)
 		for _, t in ipairs(Scanner:Get()) do
 			local p = t.Root
 			cur[p] = true
-			if not snap[p] then snap[p] = { S = p.Size, T = p.Transparency, C = p.CanCollide } end
+			if not snap[p] then snap[p] = { S = p.Size, T = p.Transparency, C = p.CanCollide, M = p.Massless } end
 			p.Size = Vector3.one * State.Config.HitboxSize
 			p.Transparency, p.CanCollide = 0.7, false
+		end
+		-- Tăng tầm xa TẤT CẢ vũ khí (Tool trên người + trong Backpack): phóng to Handle
+		local reach = State.Config.WeaponReach
+		for _, holder in ipairs({ LP.Character, LP:FindFirstChildOfClass("Backpack") }) do
+			if holder then
+				for _, tool in ipairs(holder:GetChildren()) do
+					if tool:IsA("Tool") then
+						for _, p in ipairs(tool:GetDescendants()) do
+							if p:IsA("BasePart") and p.Name == "Handle" then
+								cur[p] = true
+								if not snap[p] then snap[p] = { S = p.Size, T = p.Transparency, C = p.CanCollide, M = p.Massless } end
+								local s = snap[p].S
+								p.Massless = true -- tránh kéo lệch nhân vật
+								p.Size = Vector3.new(math.max(s.X, reach), math.max(s.Y, reach), math.max(s.Z, reach))
+							end
+						end
+					end
+				end
+			end
 		end
 		for p in pairs(snap) do if not cur[p] then restore(p) end end -- ra khỏi tầm -> trả nguyên
 	end))
@@ -545,6 +564,7 @@ end
 local main, esp, other = Tab("Main"), Tab("Esp"), Tab("Khác")
 Toggle(main, "Tele Dron", "TeleDron") Number(main, "Độ cao an toàn", "SafeHeight", 3, 60)
 Toggle(main, "Hitbox All Mod", "Hitbox") Number(main, "Cỡ hitbox", "HitboxSize", 2, 80)
+Number(main, "Tầm vũ khí", "WeaponReach", 2, 80)
 Toggle(main, "Tele Kill", "TeleKill") Toggle(main, "Aimbot", "Aimbot")
 Number(main, "Phạm vi quét", "ScanRange", 20, 500)
 Toggle(esp, "Esp Line", "EspLine") Toggle(esp, "Esp Box", "EspBox") Toggle(esp, "Esp Name", "EspName")
