@@ -184,7 +184,8 @@ Feature("Hitbox", function(m)
 	m:Give(function() for p in pairs(snap) do restore(p) end end)
 	m:Give(every(0.25, function()
 		local cur = {}
-		for _, t in ipairs(Scanner:Get()) do
+		-- Cỡ hitbox mob = 0 -> không đụng vào mob, chỉ tăng tầm vũ khí
+		for _, t in ipairs(State.Config.HitboxSize > 0 and Scanner:Get() or {}) do
 			local p = t.Root
 			cur[p] = true
 			if not snap[p] then snap[p] = { S = p.Size, T = p.Transparency, C = p.CanCollide, M = p.Massless } end
@@ -563,7 +564,7 @@ end
 
 local main, esp, other = Tab("Main"), Tab("Esp"), Tab("Khác")
 Toggle(main, "Tele Dron", "TeleDron") Number(main, "Độ cao an toàn", "SafeHeight", 3, 60)
-Toggle(main, "Hitbox All Mod", "Hitbox") Number(main, "Cỡ hitbox", "HitboxSize", 2, 80)
+Toggle(main, "Hitbox All Mod", "Hitbox") Number(main, "Cỡ hitbox mob (0=tắt)", "HitboxSize", 0, 80)
 Number(main, "Tầm vũ khí", "WeaponReach", 2, 80)
 Toggle(main, "Tele Kill", "TeleKill") Toggle(main, "Aimbot", "Aimbot")
 Number(main, "Phạm vi quét", "ScanRange", 20, 500)
