@@ -1,1158 +1,924 @@
 --[[
-    ============================================================
-    Hp Team Pro V1 - Debug Tool
-    LocalScript → StarterPlayer > StarterPlayerScripts
-    Chỉ dùng trong game của chính bạn
-    ============================================================
---]]
+	DebugConsole.client.lua  (LocalScript)
+	Đặt trong StarterPlayer > StarterPlayerScripts. Dành cho debug / test trong game của bạn.
 
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService     = game:GetService("TweenService")
-local Lighting         = game:GetService("Lighting")
-local CollectionService= game:GetService("CollectionService")
+	Cấu trúc module (đều nằm trong 1 file cho dễ dán, có thể tách thành ModuleScript):
+	  Conn / Util -> StateManager -> TargetScanner -> CombatEngine -> EspEngine -> MovementAndWorld -> UIController
 
-local lp     = Players.LocalPlayer
-local camera = workspace.CurrentCamera
+	CÁCH CẮM TẤN CÔNG CỦA GAME: sửa hàm Combat.AttackHook(target, mode) (tìm "ATTACK HOOK" bên dưới).
+	Ví dụ: tool:Activate(), hoặc FireServer vào RemoteEvent đánh/skill của game bạn.
+]]
 
-local function getChar()  return lp.Character or lp.CharacterAdded:Wait() end
-local function getRoot()  local c=getChar() return c and c:FindFirstChild("HumanoidRootPart") end
-local function getHum()   local c=getChar() return c and c:FindFirstChildOfClass("Humanoid") end
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local LP = Players.LocalPlayer
 
 --------------------------------------------------------------------------------
--- MODULE: StateManager
+-- Conn: quản lý kết nối sự kiện theo key, chống rò rỉ khi bật/tắt nhiều lần
 --------------------------------------------------------------------------------
-local SM = {}
-SM.States    = {}
-SM.Params    = {
-    ScanRange    = 150,
-    FlySpeed     = 50,
-    WalkSpeed    = 16,
-    DroneHeight  = 10,
-    HitboxSize   = 10,
-    BuryDepth    = -5,
-    FlyAirSpeed  = 50,
-    HeadDownDepth= 3,
+local Conn, _store = {}, {}
+function Conn.drop(key)
+	local c = _store[key]
+	if c then c:Disconnect() _store[key] = nil end
+end
+function Conn.set(key, signal, fn) -- luôn ngắt kết nối cũ cùng key trước khi nối mới
+	Conn.drop(key)
+	_store[key] = signal:Connect(fn)
+end
+function Conn.has(key) return _store[key] ~= nil end
+function Conn.dropAll() for k in pairs(_store) do Conn.drop(k) end end
+
+--------------------------------------------------------------------------------
+-- Util
+--------------------------------------------------------------------------------
+local Util = {}
+function Util.hum()
+	local c = LP.Character
+	local h = c and c:FindFirstChildOfClass("Humanoid")
+	if h and h.Health > 0 then return h end
+end
+function Util.hrp()
+	local c = LP.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+function Util.dist(pos)
+	local r = Util.hrp()
+	return r and (r.Position - pos).Magnitude or math.huge
+end
+function Util.safe(fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then warn("[DebugConsole] " .. tostring(err)) end
+end
+
+--------------------------------------------------------------------------------
+-- StateManager: cờ bật/tắt, cấu hình, snapshot giá trị gốc
+--------------------------------------------------------------------------------
+local State = {
+	Flags = {},
+	Config = {
+		ScanRange = 150, ScanInterval = 0.15,
+		SafeHeight = 12,      -- khoảng cách an toàn phía trên mục tiêu (Tele Dron)
+		KillDistance = 4,     -- đứng sau lưng mục tiêu (Tele Kill)
+		DroneHeight = 6,      -- Fly Dron mặc định 6
+		FlyDownDepth = 6,     -- độ sâu dưới mặt đất (Fly Down)
+		FlySpeed = 60, WalkSpeed = 40,
+		HitboxSize = 25, AimSmooth = 0.35, AttackInterval = 0.12, HoverRate = 15,
+	},
+	Runtime = { Vertical = 0 }, -- -1 / 0 / 1: nút giữ để tăng/giảm độ cao
+	_snap = {}, _listeners = {},
 }
-SM.Snapshots = {}
+-- Các nhóm loại trừ: bật cái này thì tắt các cái còn lại trong nhóm
+local EXCLUSIVE = { { "FlyAir", "FlyDron", "FlyDown" }, { "TeleDron", "TeleKill" } }
+local F, Cfg, RT = State.Flags, State.Config, State.Runtime
 
-function SM:Set(k,v)   self.States[k]=v end
-function SM:Get(k)     return self.States[k]==true end
-function SM:Toggle(k)  self.States[k]=not self.States[k]; return self.States[k] end
-function SM:Snap(k,v)  self.Snapshots[k]=v end
-function SM:Load(k)    return self.Snapshots[k] end
-
---------------------------------------------------------------------------------
--- MODULE: TargetScanner
---------------------------------------------------------------------------------
-local TS = {}
-TS._cache        = {}
-TS._lastScan     = 0
-TS._scanInterval = 0.2
-
-function TS:IsValid(model)
-    if not model or not model.Parent then return false end
-    for _,p in ipairs(Players:GetPlayers()) do
-        if p.Character == model then return false end
-    end
-    local hum  = model:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-    local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
-    if not root then return false end
-    local myRoot = getRoot()
-    if not myRoot then return false end
-    return (root.Position - myRoot.Position).Magnitude <= SM.Params.ScanRange
+function State.listen(flag, fn)
+	State._listeners[flag] = State._listeners[flag] or {}
+	table.insert(State._listeners[flag], fn)
 end
-
-function TS:Scan()
-    local now = os.clock()
-    if now - self._lastScan < self._scanInterval then return self._cache end
-    self._lastScan = now
-    local myRoot = getRoot()
-    if not myRoot then self._cache={} return self._cache end
-
-    local list = {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("Model") and obj ~= getChar() then
-            if self:IsValid(obj) then
-                local root = obj.PrimaryPart or obj:FindFirstChild("HumanoidRootPart")
-                table.insert(list, {
-                    model = obj,
-                    root  = root,
-                    dist  = (root.Position - myRoot.Position).Magnitude
-                })
-            end
-        end
-    end
-    table.sort(list, function(a,b) return a.dist < b.dist end)
-    self._cache = list
-    return list
+function State.set(flag, value)
+	value = value and true or false
+	if F[flag] == value then return end
+	if value then
+		for _, group in EXCLUSIVE do
+			if table.find(group, flag) then
+				for _, other in group do
+					if other ~= flag then State.set(other, false) end
+				end
+			end
+		end
+	end
+	F[flag] = value
+	for _, fn in State._listeners[flag] or {} do Util.safe(fn, value) end
 end
-
-function TS:Nearest()
-    local list = self:Scan()
-    return list[1]
+function State.save(key, getter) -- chỉ lưu lần đầu, không ghi đè bản gốc
+	if State._snap[key] == nil then State._snap[key] = { v = getter() } end
+end
+function State.take(key) -- lấy và xóa snapshot
+	local s = State._snap[key]
+	State._snap[key] = nil
+	return s and s.v
 end
 
 --------------------------------------------------------------------------------
--- MODULE: CombatEngine
+-- TargetScanner: quét bằng GetPartBoundsInRadius + cache theo ScanInterval
 --------------------------------------------------------------------------------
-local CE = {}
-CE._lock       = nil   -- mục tiêu đang khóa
-CE._connections= {}
+local Scanner = { cache = {}, last = 0 }
+local overlap = OverlapParams.new()
+overlap.FilterType = Enum.RaycastFilterType.Exclude
+local losParams = RaycastParams.new()
+losParams.FilterType = Enum.RaycastFilterType.Exclude
 
--- Hook tấn công: thay nội dung hàm này theo cơ chế vũ khí/skill của game bạn
--- target = Model của mục tiêu, mode = "normal"/"air"/"bury"
-function CE.AttackHook(target, mode)
-    -- VD: kích hoạt tool trong tay
-    local char = getChar()
-    local tool = char and char:FindFirstChildOfClass("Tool")
-    if tool then
-        local fireEvent = tool:FindFirstChild("Fire") or tool:FindFirstChild("Shoot")
-        if fireEvent and fireEvent:IsA("RemoteEvent") then
-            -- fireEvent:FireServer() -- bỏ comment nếu game dùng RemoteEvent
-        end
-        -- Mô phỏng click chuột
-        local mouse = lp:GetMouse()
-        if mouse then
-            -- mouse1click() -- nếu dùng executor có hàm này
-        end
-    end
+-- Trả về humanoid, root nếu Model hợp lệ (NPC/Mob còn sống, không phải người chơi)
+function Scanner.validate(model)
+	if not model or not model.Parent or not model:IsA("Model") then return nil end
+	if model == LP.Character or Players:GetPlayerFromCharacter(model) then return nil end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return nil end
+	local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+	if not root then return nil end
+	return hum, root
 end
 
--- Khóa mục tiêu thông minh, tự chuyển khi mục tiêu chết/biến mất
-function CE:LockTarget(target)
-    self._lock = target
-end
-function CE:GetLock()
-    if not self._lock then return nil end
-    if not TS:IsValid(self._lock.model) then
-        self._lock = nil
-        self._lock = TS:Nearest()
-    end
-    return self._lock
-end
-
--- Tele Dron: lơ lửng phía trên mục tiêu và tấn công hướng xuống
-CE._dronConn = nil
-function CE:StartTeleDron()
-    if self._dronConn then self._dronConn:Disconnect() end
-    self._dronConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("TeleDron") then return end
-        local t = TS:Nearest()
-        if not t then return end
-        local root = getRoot()
-        if not root then return end
-        local targetPos = t.root.Position + Vector3.new(0, SM.Params.DroneHeight, 0)
-        root.CFrame = CFrame.new(targetPos)
-        root.AssemblyLinearVelocity  = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-        CE.AttackHook(t.model, "air")
-    end)
-end
-function CE:StopTeleDron()
-    if self._dronConn then self._dronConn:Disconnect(); self._dronConn=nil end
-end
-
--- Hitbox All Mod: phóng to HumanoidRootPart của tất cả Mod
-CE._hitboxConns = {}
-function CE:StartHitbox()
-    for _, conn in ipairs(self._hitboxConns) do conn:Disconnect() end
-    self._hitboxConns = {}
-    local function applyHitbox(model)
-        if not TS:IsValid(model) then return end
-        local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
-        if root then
-            SM:Snap("HitboxSize_"..model.Name, root.Size)
-            root.Size = Vector3.new(SM.Params.HitboxSize, SM.Params.HitboxSize, SM.Params.HitboxSize)
-        end
-    end
-    local conn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("HitboxAll") then return end
-        for _, t in ipairs(TS:Scan()) do applyHitbox(t.model) end
-    end)
-    table.insert(self._hitboxConns, conn)
-end
-function CE:StopHitbox()
-    for _, conn in ipairs(self._hitboxConns) do conn:Disconnect() end
-    self._hitboxConns = {}
-    -- Khôi phục kích thước gốc
-    for _, t in ipairs(TS:Scan()) do
-        local root = t.model.PrimaryPart or t.model:FindFirstChild("HumanoidRootPart")
-        if root then
-            local orig = SM:Load("HitboxSize_"..t.model.Name)
-            if orig then root.Size = orig end
-        end
-    end
-end
-
--- Tele Kill: dịch chuyển đến mục tiêu gần nhất và tấn công
-CE._teleKillConn = nil
-function CE:StartTeleKill()
-    if self._teleKillConn then self._teleKillConn:Disconnect() end
-    self._teleKillConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("TeleKill") then return end
-        local t = TS:Nearest()
-        if not t then return end
-        local root = getRoot()
-        if not root then return end
-        local offset = Vector3.new(0, 2, -3)
-        root.CFrame = CFrame.new(t.root.Position) * CFrame.new(offset)
-        root.AssemblyLinearVelocity = Vector3.zero
-        CE.AttackHook(t.model, "normal")
-    end)
-end
-function CE:StopTeleKill()
-    if self._teleKillConn then self._teleKillConn:Disconnect(); self._teleKillConn=nil end
-end
-
--- Aimbot: hướng camera mượt vào mục tiêu gần nhất
-CE._aimbotConn = nil
-function CE:StartAimbot()
-    if self._aimbotConn then self._aimbotConn:Disconnect() end
-    self._aimbotConn = RunService.RenderStepped:Connect(function()
-        if not SM:Get("Aimbot") then return end
-        local t = TS:Nearest()
-        if not t then return end
-        local goal = CFrame.new(camera.CFrame.Position, t.root.Position)
-        camera.CFrame = camera.CFrame:Lerp(goal, 0.2)
-    end)
-end
-function CE:StopAimbot()
-    if self._aimbotConn then self._aimbotConn:Disconnect(); self._aimbotConn=nil end
-end
-
--- Model Độn Thổ: hạ tất cả Mod xuống đất
-CE._buryConn = nil
-function CE:StartBury()
-    if self._buryConn then self._buryConn:Disconnect() end
-    self._buryConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("BuryMod") then return end
-        for _, t in ipairs(TS:Scan()) do
-            local root = t.root
-            if root then
-                root.CFrame = CFrame.new(root.Position.X, SM.Params.BuryDepth, root.Position.Z)
-                root.AssemblyLinearVelocity = Vector3.zero
-            end
-        end
-    end)
-end
-function CE:StopBury()
-    if self._buryConn then self._buryConn:Disconnect(); self._buryConn=nil end
-end
-
--- Model Head Down: thân đứng yên tại chỗ, chỉ đầu bị cắm xuống đất, vô hiệu tấn công
--- FIX: không lật CFrame của root (nguyên nhân gây bay lên trời do vật lý đẩy ngược).
--- Thay vào đó giữ root cố định tuyệt đối và chỉ dịch chuyển riêng Head xuống dưới.
-CE._headDownConn = nil
-CE._headDownData = {} -- [model] = { walkSpeed, jumpPower } để khôi phục đúng khi tắt
-
-function CE:StartHeadDown()
-    if self._headDownConn then
-        self._headDownConn:Disconnect()
-        self._headDownConn = nil
-    end
-    self._headDownData = {}
-
-    self._headDownConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("HeadDown") then return end
-
-        for _, t in ipairs(TS:Scan()) do
-            local model = t.model
-            local root  = t.root
-            local hum   = model:FindFirstChildOfClass("Humanoid")
-            local head  = model:FindFirstChild("Head")
-
-            if not root or not hum or not head then continue end
-
-            -- Lưu snapshot lần đầu gặp mod này (chỉ lưu 1 lần, tránh ghi đè giá trị đã bị khoá)
-            if not self._headDownData[model] then
-                self._headDownData[model] = {
-                    walkSpeed = hum.WalkSpeed,
-                    jumpPower = hum.JumpPower,
-                }
-            end
-
-            -- Vô hiệu khả năng tấn công / di chuyển
-            hum.WalkSpeed = 0
-            hum.JumpPower  = 0
-
-            -- Giữ thân đứng yên tuyệt đối, không đụng CFrame của root
-            root.AssemblyLinearVelocity  = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-
-            -- Tính mốc mặt đất từ chân nhân vật rồi cắm đầu xuống theo độ sâu cấu hình
-            local groundY  = root.Position.Y - (root.Size.Y / 2)
-            local newHeadY = groundY - SM.Params.HeadDownDepth
-
-            head.CFrame = CFrame.new(root.Position.X, newHeadY, root.Position.Z)
-            head.AssemblyLinearVelocity  = Vector3.zero
-            head.AssemblyAngularVelocity = Vector3.zero
-        end
-    end)
-end
-
-function CE:StopHeadDown()
-    if self._headDownConn then
-        self._headDownConn:Disconnect()
-        self._headDownConn = nil
-    end
-
-    -- Khôi phục từng mod đã bị ảnh hưởng, kể cả khi đã rời phạm vi quét
-    for model, data in pairs(self._headDownData) do
-        if model and model.Parent then
-            local hum  = model:FindFirstChildOfClass("Humanoid")
-            local head = model:FindFirstChild("Head")
-            local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
-
-            if hum then
-                hum.WalkSpeed = data.walkSpeed or 16
-                hum.JumpPower  = data.jumpPower or 50
-            end
-
-            -- Trả đầu về đúng vị trí trên cổ dựa theo kích thước thực tế
-            if head and root then
-                local neckOffset = root.Size.Y / 2 + head.Size.Y / 2 + 0.5
-                head.CFrame = CFrame.new(root.Position.X, root.Position.Y + neckOffset, root.Position.Z)
-            end
-        end
-    end
-
-    self._headDownData = {}
+function Scanner.get(force)
+	local now = os.clock()
+	if not force and now - Scanner.last < Cfg.ScanInterval then return Scanner.cache end
+	Scanner.last = now
+	local myRoot = Util.hrp()
+	local list = {}
+	if myRoot then
+		overlap.FilterDescendantsInstances = { LP.Character }
+		local seen = {}
+		for _, part in Workspace:GetPartBoundsInRadius(myRoot.Position, Cfg.ScanRange, overlap) do
+			local m = part
+			while m and m ~= Workspace do -- đi lên tới Model có Humanoid
+				if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then break end
+				m = m.Parent
+			end
+			if m and m ~= Workspace and not seen[m] then
+				seen[m] = true
+				local hum, root = Scanner.validate(m)
+				if hum then
+					local d = (root.Position - myRoot.Position).Magnitude
+					if d <= Cfg.ScanRange then
+						-- khả năng tiếp cận: bị che thì cộng phạt khoảng cách để ưu tiên mục tiêu thấy được
+						losParams.FilterDescendantsInstances = { LP.Character, m }
+						local blocked = Workspace:Raycast(myRoot.Position, root.Position - myRoot.Position, losParams)
+						table.insert(list, { model = m, root = root, hum = hum, dist = d, score = d + (blocked and 25 or 0) })
+					end
+				end
+			end
+		end
+		table.sort(list, function(a, b) return a.score < b.score end)
+	end
+	Scanner.cache = list
+	return list
 end
 
 --------------------------------------------------------------------------------
--- MODULE: EspEngine
+-- CombatEngine
 --------------------------------------------------------------------------------
-local EE = {}
-EE._drawings = {}  -- [model] = {line, box, nameLabel, distLabel, highlight}
-EE._conn     = nil
+local Combat = { lock = nil, lastAtk = 0, lastSwitch = 0 }
 
-local function w2s(pos)
-    -- Chuyển tọa độ 3D sang 2D màn hình
-    local vp = camera.ViewportSize
-    local _, onScreen = camera:WorldToViewportPoint(pos)
-    if not onScreen then return nil end
-    local screenPos = camera:WorldToScreenPoint(pos)
-    return Vector2.new(screenPos.X, screenPos.Y), onScreen
+-- ===== ATTACK HOOK: cắm cơ chế đánh/bắn của game vào đây =====
+-- target: Model mục tiêu; mode: "TeleDron" | "TeleKill"
+-- Mặc định: kích hoạt Tool đang cầm. Nếu game dùng RemoteEvent, ví dụ:
+--   game.ReplicatedStorage.Remotes.Attack:FireServer(target)
+Combat.AttackHook = function(target, mode)
+	local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+	if tool then tool:Activate() end
 end
 
-local function newLine(color)
-    local d = Drawing.new("Line")
-    d.Visible   = false
-    d.Color     = color or Color3.fromRGB(0,255,0)
-    d.Thickness = 1
-    return d
-end
-local function newLabel(color)
-    local d = Drawing.new("Text")
-    d.Visible  = false
-    d.Color    = color or Color3.fromRGB(255,255,255)
-    d.Size     = 14
-    d.Outline  = true
-    d.Font     = Drawing.Fonts.UI
-    return d
-end
-local function newBox(color)
-    local d = Drawing.new("Square")
-    d.Visible   = false
-    d.Color     = color or Color3.fromRGB(0,255,0)
-    d.Thickness = 1
-    d.Filled    = false
-    return d
+function Combat.attack(target, mode)
+	local now = os.clock()
+	if now - Combat.lastAtk < Cfg.AttackInterval then return end
+	Combat.lastAtk = now
+	Util.safe(Combat.AttackHook, target, mode)
 end
 
-function EE:GetOrCreate(model)
-    if not self._drawings[model] then
-        self._drawings[model] = {
-            line      = newLine(Color3.fromRGB(0,255,0)),
-            box       = newBox(Color3.fromRGB(0,255,0)),
-            nameLabel = newLabel(Color3.fromRGB(255,255,0)),
-            distLabel = newLabel(Color3.fromRGB(255,255,255)),
-            highlight = nil,
-        }
-    end
-    return self._drawings[model]
+-- Khóa mục tiêu tạm thời: giữ nếu còn sống & trong tầm, ngược lại tự chuyển sang mục tiêu gần nhất
+function Combat.pick()
+	local lock = Combat.lock
+	if lock then
+		local hum, root = Scanner.validate(lock)
+		if hum and Util.dist(root.Position) <= Cfg.ScanRange then return lock, root end
+		Combat.lock = nil
+	end
+	local best = Scanner.get(true)[1]
+	if best then
+		Combat.lock = best.model
+		Combat.lastSwitch = os.clock()
+		return best.model, best.root
+	end
 end
 
-function EE:CleanModel(model)
-    local d = self._drawings[model]
-    if not d then return end
-    if d.line      then d.line.Visible=false;      d.line:Remove() end
-    if d.box       then d.box.Visible=false;       d.box:Remove() end
-    if d.nameLabel then d.nameLabel.Visible=false; d.nameLabel:Remove() end
-    if d.distLabel then d.distLabel.Visible=false; d.distLabel:Remove() end
-    if d.highlight then d.highlight:Destroy() end
-    self._drawings[model] = nil
+local function combatStep()
+	if not (F.TeleDron or F.TeleKill) then return end
+	local hrp = Util.hrp()
+	if not hrp then return end
+	local model, root = Combat.pick()
+	if not model then return end
+	local pos, mode
+	if F.TeleDron then
+		pos = root.Position + Vector3.new(0, Cfg.SafeHeight, 0) -- lơ lửng trên đầu mob, né cận chiến
+		mode = "TeleDron"
+	else
+		pos = root.Position - root.CFrame.LookVector * Cfg.KillDistance
+		mode = "TeleKill"
+	end
+	-- upVector tùy chọn tránh lỗi suy biến khi nhìn thẳng xuống
+	hrp.CFrame = CFrame.lookAt(pos, root.Position, Vector3.new(0, 0, -1))
+	hrp.AssemblyLinearVelocity = Vector3.zero -- triệt tiêu lực rơi / đẩy lùi
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	Combat.attack(model, mode)
 end
 
-function EE:CleanAll()
-    for model, _ in pairs(self._drawings) do
-        self:CleanModel(model)
-    end
+-- Aimbot: lerp camera, có ramp-up sau khi đổi mục tiêu để chống giật
+local aimBlend, aimLast = 0, nil
+local function aimStep(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+	local model, root = Combat.pick()
+	if not model then aimLast = nil return end
+	if model ~= aimLast then aimLast, aimBlend = model, 0 end
+	aimBlend = math.min(1, aimBlend + dt / 0.15)
+	local part = model:FindFirstChild("Head") or root
+	local want = CFrame.lookAt(cam.CFrame.Position, part.Position)
+	local alpha = math.clamp(Cfg.AimSmooth * aimBlend * (dt * 60), 0, 1)
+	cam.CFrame = cam.CFrame:Lerp(want, alpha)
 end
 
-function EE:Start()
-    if self._conn then self._conn:Disconnect() end
-    self._conn = RunService.RenderStepped:Connect(function()
-        -- Danh sách model hợp lệ hiện tại
-        local validSet = {}
-        for _, t in ipairs(TS:Scan()) do
-            validSet[t.model] = t
-        end
+-- Hitbox All Mod + All Mod Im: chạy theo nhịp ScanInterval, lưu/khôi phục giá trị gốc
+local hbOrig = setmetatable({}, { __mode = "k" })   -- root -> {Size, CanCollide, Transparency, Massless}
+local imOrig = setmetatable({}, { __mode = "k" })   -- humanoid -> {WalkSpeed, JumpPower, JumpHeight, AutoRotate}
 
-        -- Dọn model không còn hợp lệ
-        for model, _ in pairs(self._drawings) do
-            if not validSet[model] then
-                self:CleanModel(model)
-            end
-        end
-
-        local vp = camera.ViewportSize
-        local center = Vector2.new(vp.X/2, 0) -- đỉnh màn hình giữa
-
-        for model, t in pairs(validSet) do
-            local d    = self:GetOrCreate(model)
-            local root = t.root
-            if not root then continue end
-
-            local screenPos, onScreen = w2s(root.Position + Vector3.new(0,2,0))
-
-            -- ESP Line
-            if SM:Get("EspLine") and onScreen and screenPos then
-                d.line.From    = center
-                d.line.To      = screenPos
-                d.line.Visible = true
-            else
-                d.line.Visible = false
-            end
-
-            -- ESP Box (đơn giản 2D dùng bounding box)
-            if SM:Get("EspBox") and onScreen and screenPos then
-                local topPos, _    = w2s(root.Position + Vector3.new(0,3,0))
-                local bottomPos, _ = w2s(root.Position + Vector3.new(0,-3,0))
-                if topPos and bottomPos then
-                    local h = math.abs(topPos.Y - bottomPos.Y)
-                    local w = h * 0.5
-                    d.box.Position = Vector2.new(screenPos.X - w/2, topPos.Y)
-                    d.box.Size     = Vector2.new(w, h)
-                    d.box.Visible  = true
-                end
-            else
-                d.box.Visible = false
-            end
-
-            -- ESP Name
-            if SM:Get("EspName") and onScreen and screenPos then
-                d.nameLabel.Position = Vector2.new(screenPos.X, screenPos.Y - 30)
-                d.nameLabel.Text     = model.Name
-                d.nameLabel.Visible  = true
-            else
-                d.nameLabel.Visible = false
-            end
-
-            -- ESP Distance
-            if SM:Get("EspDist") and onScreen and screenPos then
-                d.distLabel.Position = Vector2.new(screenPos.X, screenPos.Y - 15)
-                d.distLabel.Text     = string.format("%.0f m", t.dist)
-                d.distLabel.Visible  = true
-            else
-                d.distLabel.Visible = false
-            end
-
-            -- ESP Hologram (Highlight xuyên tường)
-            if SM:Get("EspHolo") then
-                if not d.highlight or not d.highlight.Parent then
-                    local hl = Instance.new("SelectionBox")
-                    hl.Adornee       = model
-                    hl.Color3        = Color3.fromRGB(0,255,0)
-                    hl.LineThickness = 0.05
-                    hl.SurfaceTransparency = 0.5
-                    hl.SurfaceColor3 = Color3.fromRGB(0,255,0)
-                    hl.Parent        = workspace
-                    d.highlight      = hl
-                end
-            else
-                if d.highlight then d.highlight:Destroy(); d.highlight=nil end
-            end
-        end
-    end)
+local function restoreHitbox(root)
+	local o = hbOrig[root]
+	if o and root.Parent then
+		root.Size, root.CanCollide, root.Transparency, root.Massless = o.Size, o.CanCollide, o.Transparency, o.Massless
+	end
+	hbOrig[root] = nil
+end
+local function restoreMob(hum)
+	local o = imOrig[hum]
+	if o and hum.Parent then
+		hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = o.WalkSpeed, o.JumpPower, o.JumpHeight, o.AutoRotate
+	end
+	imOrig[hum] = nil
 end
 
-function EE:Stop()
-    if self._conn then self._conn:Disconnect(); self._conn=nil end
-    self:CleanAll()
+local modAcc = 0
+local function modStep(dt)
+	modAcc += dt
+	if modAcc < 0.2 then return end
+	modAcc = 0
+	local inRange = {}
+	for _, t in Scanner.get() do
+		inRange[t.root], inRange[t.hum] = true, true
+		if F.HitboxAll then
+			if not hbOrig[t.root] then
+				hbOrig[t.root] = { Size = t.root.Size, CanCollide = t.root.CanCollide, Transparency = t.root.Transparency, Massless = t.root.Massless }
+			end
+			-- phóng to HRP: phủ cả vùng dưới đất / sau tường để đòn đánh vẫn trúng
+			t.root.Size = Vector3.one * Cfg.HitboxSize
+			t.root.CanCollide = false
+			t.root.Transparency = 0.8
+			t.root.Massless = true
+		end
+		if F.AllModIm then
+			if not imOrig[t.hum] then
+				imOrig[t.hum] = { WalkSpeed = t.hum.WalkSpeed, JumpPower = t.hum.JumpPower, JumpHeight = t.hum.JumpHeight, AutoRotate = t.hum.AutoRotate }
+			end
+			-- Giữ mob đứng yên (không di chuyển / không đuổi được người chơi)
+			t.hum.WalkSpeed, t.hum.JumpPower, t.hum.JumpHeight, t.hum.AutoRotate = 0, 0, 0, false
+		end
+	end
+	-- trả lại mục tiêu đã ra ngoài tầm / chết / tắt tính năng
+	for root in pairs(hbOrig) do if not F.HitboxAll or not inRange[root] then restoreHitbox(root) end end
+	for hum in pairs(imOrig) do if not F.AllModIm or not inRange[hum] then restoreMob(hum) end end
 end
 
--- ESP Workspace.Items
-EE._itemHighlights = {}
-EE._itemConn       = nil
-
-function EE:StartWorkspaceEsp()
-    if self._itemConn then self._itemConn:Disconnect() end
-    self._itemConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("EspWorkspace") then return end
-        local folder = workspace:FindFirstChild("Items")
-        if not folder then return end
-        local existing = {}
-        for _, item in ipairs(folder:GetChildren()) do
-            existing[item] = true
-            if not self._itemHighlights[item] then
-                local hl = Instance.new("SelectionBox")
-                hl.Adornee       = item
-                hl.Color3        = Color3.fromRGB(255,165,0)
-                hl.LineThickness = 0.05
-                hl.SurfaceTransparency = 0.4
-                hl.SurfaceColor3 = Color3.fromRGB(255,165,0)
-                hl.Parent        = workspace
-                self._itemHighlights[item] = hl
-            end
-        end
-        -- Dọn vật phẩm đã biến mất
-        for item, hl in pairs(self._itemHighlights) do
-            if not existing[item] or not item.Parent then
-                hl:Destroy()
-                self._itemHighlights[item] = nil
-            end
-        end
-    end)
+local function updateCombatConns()
+	if F.TeleDron or F.TeleKill then Conn.set("combat", RunService.Heartbeat, combatStep) else Conn.drop("combat") end
+	if F.Aimbot then Conn.set("aim", RunService.RenderStepped, aimStep) else Conn.drop("aim") aimLast = nil end
+	if F.HitboxAll or F.AllModIm then
+		Conn.set("mods", RunService.Heartbeat, modStep)
+	else
+		Conn.drop("mods")
+		for r in pairs(hbOrig) do restoreHitbox(r) end
+		for h in pairs(imOrig) do restoreMob(h) end
+	end
 end
-
-function EE:StopWorkspaceEsp()
-    if self._itemConn then self._itemConn:Disconnect(); self._itemConn=nil end
-    for _, hl in pairs(self._itemHighlights) do hl:Destroy() end
-    self._itemHighlights = {}
+for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm" } do
+	State.listen(f, function()
+		if not (F.TeleDron or F.TeleKill) then Combat.lock = nil end
+		updateCombatConns()
+	end)
 end
 
 --------------------------------------------------------------------------------
--- MODULE: MovementAndWorld
+-- EspEngine (dựng bằng GUI + Highlight, không phụ thuộc Drawing API)
 --------------------------------------------------------------------------------
-local MW = {}
-MW._connections = {}
-MW._flyBody     = nil
-MW._noclipConn  = nil
-MW._flyAirConn  = nil
-MW._jumpConn    = nil
-MW._speedConn   = nil
-MW._nightSnap   = {}
+local Esp = { entries = {}, items = {}, itemAcc = 0 }
+local espGui, hlFolder
 
-local function disconnectAll(tbl)
-    for i, c in ipairs(tbl) do c:Disconnect(); tbl[i]=nil end
+local function ensureEspLayer()
+	if espGui and espGui.Parent then return end
+	espGui = Instance.new("ScreenGui")
+	espGui.Name, espGui.ResetOnSpawn, espGui.IgnoreGuiInset, espGui.DisplayOrder = "EspLayer", false, true, 50
+	espGui.Parent = LP:WaitForChild("PlayerGui")
+	hlFolder = Instance.new("Folder")
+	hlFolder.Name = "EspHighlights"
+	hlFolder.Parent = Workspace.CurrentCamera
 end
 
--- No Clip
-function MW:StartNoClip()
-    self._noclipConn = RunService.Stepped:Connect(function()
-        if not SM:Get("NoClip") then return end
-        local char = getChar()
-        if not char then return end
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide=false end
-        end
-    end)
-end
-function MW:StopNoClip()
-    if self._noclipConn then self._noclipConn:Disconnect(); self._noclipConn=nil end
-    local char = getChar()
-    if not char then return end
-    for _, p in ipairs(char:GetDescendants()) do
-        if p:IsA("BasePart") then p.CanCollide=true end
-    end
+local function mkLabel(color)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency, l.TextColor3, l.TextStrokeTransparency = 1, color, 0.3
+	l.Font, l.TextSize, l.Size, l.AnchorPoint = Enum.Font.GothamBold, 13, UDim2.fromOffset(160, 14), Vector2.new(0.5, 1)
+	l.Parent = espGui
+	return l
 end
 
--- Fly Air: bay trên không, giữ độ cao khi đứng yên
-MW._flyAirHeight = nil
-MW._flyAirUp     = false
-MW._flyAirDown   = false
-
-function MW:StartFlyAir()
-    local root = getRoot()
-    if not root then return end
-    local hum  = getHum()
-
-    -- Tắt gravity bằng BodyPosition
-    if self._flyBody then self._flyBody:Destroy() end
-    local bp = Instance.new("BodyPosition")
-    bp.MaxForce = Vector3.new(1e5,1e5,1e5)
-    bp.P        = 1e4
-    bp.D        = 500
-    bp.Position = root.Position
-    bp.Parent   = root
-    self._flyBody       = bp
-    self._flyAirHeight  = root.Position.Y
-
-    if hum then
-        SM:Snap("HumState", hum.PlatformStand)
-        hum.PlatformStand = true
-    end
-
-    self._flyAirConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("FlyAir") then return end
-        local r = getRoot()
-        if not r then return end
-
-        local delta = 0
-        if self._flyAirUp   then delta =  SM.Params.FlyAirSpeed * 0.016 end
-        if self._flyAirDown then delta = -SM.Params.FlyAirSpeed * 0.016 end
-        self._flyAirHeight = self._flyAirHeight + delta
-
-        local curPos = r.Position
-        self._flyBody.Position = Vector3.new(curPos.X, self._flyAirHeight, curPos.Z)
-    end)
+local function newEntry()
+	return {}
+end
+local function dropField(e, k)
+	if e[k] then e[k]:Destroy() e[k] = nil end
+end
+local function dropEntry(model)
+	local e = Esp.entries[model]
+	if e then
+		for k in pairs(e) do dropField(e, k) end
+		Esp.entries[model] = nil
+	end
+end
+function Esp.clearAll()
+	for m in pairs(Esp.entries) do dropEntry(m) end
+	for inst, hl in pairs(Esp.items) do hl:Destroy() Esp.items[inst] = nil end
 end
 
-function MW:StopFlyAir()
-    if self._flyAirConn then self._flyAirConn:Disconnect(); self._flyAirConn=nil end
-    if self._flyBody    then self._flyBody:Destroy(); self._flyBody=nil end
-    local hum = getHum()
-    if hum then hum.PlatformStand = SM:Load("HumState") or false end
+-- 3D bounding box -> hình chữ nhật 2D (World-to-Screen), nil nếu một góc nằm sau camera
+local SIGN = { -1, 1 }
+local function screenRect(model, cam)
+	local cf, size = model:GetBoundingBox()
+	local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
+	local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+	for _, sx in SIGN do for _, sy in SIGN do for _, sz in SIGN do
+		local v = cam:WorldToViewportPoint(cf:PointToWorldSpace(Vector3.new(sx * hx, sy * hy, sz * hz)))
+		if v.Z <= 0 then return nil end
+		minX, maxX = math.min(minX, v.X), math.max(maxX, v.X)
+		minY, maxY = math.min(minY, v.Y), math.max(maxY, v.Y)
+	end end end
+	return minX, minY, maxX, maxY
 end
 
--- Fly Dron: bay úp mặt xuống, cố định độ cao
-MW._dronBody   = nil
-MW._dronHeight = 6
-MW._dronConn2  = nil
+local function espTargetStep(cam)
+	local seen = {}
+	local vp = cam.ViewportSize
+	for _, t in Scanner.get() do
+		local model = t.model
+		local hum, root = Scanner.validate(model) -- chết/biến mất -> bị loại ngay, entry bị xóa bên dưới
+		if hum then
+			local dist = Util.dist(root.Position)
+			if dist <= Cfg.ScanRange then
+				seen[model] = true
+				local e = Esp.entries[model] or newEntry()
+				Esp.entries[model] = e
+				local sp = cam:WorldToViewportPoint(root.Position)
+				local onScreen = sp.Z > 0
 
-function MW:StartFlyDron()
-    local root = getRoot()
-    if not root then return end
-    self._dronHeight = SM.Params.DroneHeight
+				-- Line: từ cạnh trên giữa màn hình tới mục tiêu
+				if F.EspLine and onScreen then
+					if not e.line then
+						e.line = Instance.new("Frame")
+						e.line.AnchorPoint, e.line.BorderSizePixel = Vector2.new(0.5, 0.5), 0
+						e.line.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+						e.line.Parent = espGui
+					end
+					local a, b = Vector2.new(vp.X / 2, 0), Vector2.new(sp.X, sp.Y)
+					local d = b - a
+					e.line.Size = UDim2.fromOffset(d.Magnitude, 1.5)
+					e.line.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+					e.line.Rotation = math.deg(math.atan2(d.Y, d.X))
+				else
+					dropField(e, "line")
+				end
 
-    if self._dronBody then self._dronBody:Destroy() end
-    local bp = Instance.new("BodyPosition")
-    bp.MaxForce = Vector3.new(1e5,1e5,1e5)
-    bp.P        = 1e4
-    bp.D        = 500
-    bp.Position = root.Position + Vector3.new(0, self._dronHeight, 0)
-    bp.Parent   = root
-    self._dronBody = bp
+				-- Box / Name / Distance dùng chung hình chữ nhật 2D
+				local needRect = F.EspBox or F.EspName or F.EspDistance
+				local x1, y1, x2, y2
+				if needRect then x1, y1, x2, y2 = screenRect(model, cam) end
+				if x1 and F.EspBox then
+					if not e.box then
+						e.box = Instance.new("Frame")
+						e.box.BackgroundTransparency, e.box.BorderSizePixel = 1, 0
+						local s = Instance.new("UIStroke")
+						s.Color, s.Thickness = Color3.fromRGB(255, 255, 0), 1.5
+						s.Parent = e.box
+						e.box.Parent = espGui
+					end
+					e.box.Position = UDim2.fromOffset(x1, y1)
+					e.box.Size = UDim2.fromOffset(x2 - x1, y2 - y1)
+				else
+					dropField(e, "box")
+				end
+				if x1 and F.EspName then
+					e.name = e.name or mkLabel(Color3.new(1, 1, 1))
+					e.name.Text = model.Name
+					e.name.Position = UDim2.fromOffset((x1 + x2) / 2, y1 - 2)
+				else
+					dropField(e, "name")
+				end
+				if x1 and F.EspDistance then
+					e.dist = e.dist or mkLabel(Color3.fromRGB(120, 220, 255))
+					e.dist.AnchorPoint = Vector2.new(0.5, 0)
+					e.dist.Text = string.format("%.0f studs (%.0f m)", dist, dist * 0.28)
+					e.dist.Position = UDim2.fromOffset((x1 + x2) / 2, y2 + 2)
+				else
+					dropField(e, "dist")
+				end
 
-    self._dronConn2 = RunService.Heartbeat:Connect(function()
-        if not SM:Get("FlyDron") then return end
-        local r = getRoot()
-        if not r then return end
-        r.CFrame = CFrame.new(r.Position) * CFrame.Angles(math.pi,0,0)
-        self._dronBody.Position = Vector3.new(r.Position.X, self._dronHeight, r.Position.Z)
-    end)
+				-- Hologram: Highlight xuyên vật cản
+				if F.EspHologram then
+					if not e.hl then
+						local h = Instance.new("Highlight")
+						h.FillColor, h.OutlineColor = Color3.fromRGB(255, 60, 60), Color3.new(1, 1, 1)
+						h.FillTransparency, h.DepthMode = 0.6, Enum.HighlightDepthMode.AlwaysOnTop
+						h.Adornee, h.Parent = model, hlFolder
+						e.hl = h
+					end
+				else
+					dropField(e, "hl")
+				end
+			end
+		end
+	end
+	for m in pairs(Esp.entries) do if not seen[m] then dropEntry(m) end end
 end
-function MW:StopFlyDron()
-    if self._dronConn2 then self._dronConn2:Disconnect(); self._dronConn2=nil end
-    if self._dronBody  then self._dronBody:Destroy(); self._dronBody=nil end
-    local root = getRoot()
-    if root then root.CFrame = CFrame.new(root.Position) end
+
+-- Esp Workspace: quét an toàn workspace.Item (có thể chưa tồn tại / bị xóa giữa chừng)
+local function collectItems(parent, out, depth)
+	for _, obj in parent:GetChildren() do
+		if obj:IsA("Model") or obj:IsA("BasePart") then
+			out[#out + 1] = obj
+		elseif depth < 3 and (obj:IsA("Folder") or obj:IsA("Configuration")) then
+			collectItems(obj, out, depth + 1)
+		end
+	end
+end
+local function itemStep()
+	local folder = Workspace:FindFirstChild("Item")
+	local want = {}
+	if folder then
+		local list = {}
+		collectItems(folder, list, 0)
+		for _, obj in list do
+			if obj.Parent then
+				local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
+				local hum = obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid")
+				if Util.dist(pos) <= Cfg.ScanRange and not (hum and hum.Health <= 0) then
+					want[obj] = true
+					if not Esp.items[obj] then
+						local h = Instance.new("Highlight")
+						h.FillColor, h.OutlineColor = Color3.fromRGB(80, 255, 120), Color3.new(1, 1, 1)
+						h.FillTransparency, h.DepthMode = 0.6, Enum.HighlightDepthMode.AlwaysOnTop
+						h.Adornee, h.Parent = obj, hlFolder
+						Esp.items[obj] = h
+					end
+				end
+			end
+		end
+	end
+	for obj, h in pairs(Esp.items) do
+		if not want[obj] or not obj.Parent then h:Destroy() Esp.items[obj] = nil end
+	end
 end
 
--- Fly Down: nằm ngửa, hạ xuống đất
-MW._flyDownConn = nil
-function MW:StartFlyDown()
-    local root = getRoot()
-    if not root then return end
-    SM:Snap("FlyDown_Y", root.Position.Y)
-    self._flyDownConn = RunService.Heartbeat:Connect(function()
-        if not SM:Get("FlyDown") then return end
-        local r = getRoot()
-        if not r then return end
-        r.CFrame = CFrame.new(r.Position) * CFrame.Angles(-math.pi/2,0,0)
-        r.AssemblyLinearVelocity = Vector3.zero
-    end)
+local function espStep(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+	ensureEspLayer()
+	if F.EspLine or F.EspBox or F.EspName or F.EspDistance or F.EspHologram then
+		espTargetStep(cam)
+	else
+		for m in pairs(Esp.entries) do dropEntry(m) end
+	end
+	if F.EspWorkspace then
+		Esp.itemAcc += dt
+		if Esp.itemAcc >= 0.4 then Esp.itemAcc = 0 itemStep() end
+	else
+		for obj, h in pairs(Esp.items) do h:Destroy() Esp.items[obj] = nil end
+	end
 end
-function MW:StopFlyDown()
-    if self._flyDownConn then self._flyDownConn:Disconnect(); self._flyDownConn=nil end
-    local root = getRoot()
-    if root then root.CFrame = CFrame.new(root.Position) end
+local ESP_FLAGS = { "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram", "EspWorkspace" }
+for _, f in ESP_FLAGS do
+	State.listen(f, function()
+		local any = false
+		for _, k in ESP_FLAGS do any = any or F[k] end
+		if any then
+			ensureEspLayer()
+			Conn.set("esp", RunService.RenderStepped, espStep)
+		else
+			Conn.drop("esp")
+			Esp.clearAll() -- dọn sạch mọi thứ khi tắt hết
+		end
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- MovementAndWorld
+--------------------------------------------------------------------------------
+local Move = { yaw = 0, groundY = 0, noclipReasons = {}, noclipOrig = setmetatable({}, { __mode = "k" }) }
+
+-- NoClip (đếm tham chiếu: Fly Down cũng cần noclip để chui xuống đất)
+local function noclipStep()
+	local c = LP.Character
+	if not c then return end
+	for _, p in c:GetDescendants() do
+		if p:IsA("BasePart") then
+			if Move.noclipOrig[p] == nil then Move.noclipOrig[p] = p.CanCollide end
+			p.CanCollide = false
+		end
+	end
+end
+local function refreshNoclip()
+	if next(Move.noclipReasons) then
+		Conn.set("noclip", RunService.Stepped, noclipStep)
+	else
+		Conn.drop("noclip")
+		for p, orig in pairs(Move.noclipOrig) do
+			if p.Parent then p.CanCollide = orig end -- khôi phục chính xác trạng thái ban đầu
+			Move.noclipOrig[p] = nil
+		end
+	end
+end
+function Move.setNoclip(reason, on)
+	Move.noclipReasons[reason] = on or nil
+	refreshNoclip()
+end
+State.listen("NoClip", function(on) Move.setNoclip("user", on) end)
+
+-- Fly Air / Fly Dron / Fly Down dùng chung 1 vòng Heartbeat
+local rayP = RaycastParams.new()
+rayP.FilterType = Enum.RaycastFilterType.Exclude
+local function flyStep(dt)
+	local hum, hrp = Util.hum(), Util.hrp()
+	if not (hum and hrp) then return end
+	hum.PlatformStand = true -- tránh Humanoid tự đứng/rơi làm lệch vị trí
+	local move, v = hum.MoveDirection, RT.Vertical
+
+	if F.FlyAir then
+		-- Trọng lực vẫn kéo xuống 1 chút mỗi bước vật lý, nên không chỉ đặt vận tốc:
+		-- ta giữ độ cao mục tiêu Move.airY, chỉ đổi khi bấm lên/xuống, và ghim lại Y mỗi khung hình.
+		local pos0 = hrp.Position
+		if not Move.airY or Move.airHrp ~= hrp then Move.airY, Move.airHrp = pos0.Y, hrp end
+		Move.airY += v * Cfg.FlySpeed * dt
+		local look = move.Magnitude > 0.1 and Vector3.new(move.X, 0, move.Z) or nil
+		local base = look and CFrame.lookAt(Vector3.new(pos0.X, Move.airY, pos0.Z), Vector3.new(pos0.X + look.X, Move.airY, pos0.Z + look.Z))
+			or (hrp.CFrame.Rotation + Vector3.new(pos0.X, Move.airY, pos0.Z))
+		hrp.CFrame = base
+		-- Y = 0 hoàn toàn: đứng yên giữa trời, không rơi / không trôi
+		hrp.AssemblyLinearVelocity = Vector3.new(move.X * Cfg.FlySpeed, 0, move.Z * Cfg.FlySpeed)
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		return
+	end
+
+	-- Dron (úp mặt, cách đất DroneHeight) / Down (ngửa mặt, chìm dưới đất FlyDownDepth)
+	local pos = hrp.Position
+	rayP.FilterDescendantsInstances = { LP.Character }
+	local originY = pos.Y + (F.FlyDown and Cfg.FlyDownDepth or 0) + 3
+	local hit = Workspace:Raycast(Vector3.new(pos.X, originY, pos.Z), Vector3.new(0, -600, 0), rayP)
+	if hit then Move.groundY = hit.Position.Y end -- không thấy đất thì giữ giá trị cũ => không rơi
+	local wantY
+	if F.FlyDron then
+		Cfg.DroneHeight = math.clamp(Cfg.DroneHeight + v * Cfg.HoverRate * dt, 1, 300)
+		wantY = Move.groundY + Cfg.DroneHeight
+	else
+		-- depth > 0: dưới đất; depth <= 0: ngang/trên mặt đất (▲ giảm depth để đi lên, không bị chặn ở mặt đất)
+		Cfg.FlyDownDepth = math.clamp(Cfg.FlyDownDepth - v * math.max(Cfg.HoverRate, Cfg.FlySpeed * 0.5) * dt, -150, 150)
+		wantY = Move.groundY - Cfg.FlyDownDepth
+	end
+	if move.Magnitude > 0.1 then Move.yaw = math.atan2(-move.X, -move.Z) end
+	local newPos = Vector3.new(
+		pos.X + move.X * Cfg.FlySpeed * dt,
+		pos.Y + (wantY - pos.Y) * math.min(1, dt * 10),
+		pos.Z + move.Z * Cfg.FlySpeed * dt)
+	local pitch = F.FlyDron and -math.pi / 2 or math.pi / 2
+	hrp.CFrame = CFrame.new(newPos) * CFrame.Angles(0, Move.yaw, 0) * CFrame.Angles(pitch, 0, 0)
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	-- Camera không bị chỉnh => giữ nguyên góc camera gốc
+end
+
+local function refreshFly()
+	Move.airY = nil -- lấy lại độ cao hiện tại mỗi lần bật/tắt chế độ bay
+	if F.FlyAir or F.FlyDron or F.FlyDown then
+		local cam = Workspace.CurrentCamera
+		if cam then local l = cam.CFrame.LookVector Move.yaw = math.atan2(-l.X, -l.Z) end
+		State.save("PlatformStand", function() local h = Util.hum() return h and h.PlatformStand or false end)
+		Conn.set("fly", RunService.Heartbeat, flyStep)
+	else
+		Conn.drop("fly")
+		RT.Vertical = 0
+		local h, r = Util.hum(), Util.hrp()
+		if h then h.PlatformStand = State.take("PlatformStand") or false end
+		if r then -- đứng thẳng lại
+			r.CFrame = CFrame.new(r.Position) * CFrame.Angles(0, Move.yaw, 0)
+			r.AssemblyLinearVelocity = Vector3.zero
+		end
+	end
+end
+for _, f in { "FlyAir", "FlyDron", "FlyDown" } do
+	State.listen(f, function()
+		Move.setNoclip("FlyDown", F.FlyDown)
+		refreshFly()
+	end)
 end
 
 -- Speed
-function MW:SetSpeed(val)
-    local hum = getHum()
-    if hum then
-        SM:Snap("OrigSpeed", hum.WalkSpeed)
-        hum.WalkSpeed = val
-    end
-end
-function MW:ResetSpeed()
-    local hum = getHum()
-    if hum then hum.WalkSpeed = SM:Load("OrigSpeed") or 16 end
-end
+local spd = {}
+State.listen("Speed", function(on)
+	if on then
+		Conn.set("speed", RunService.Heartbeat, function()
+			local h = Util.hum()
+			if not h then return end
+			if spd.hum ~= h then spd.hum, spd.orig = h, h.WalkSpeed end -- snapshot theo từng nhân vật
+			h.WalkSpeed = Cfg.WalkSpeed
+		end)
+	else
+		Conn.drop("speed")
+		if spd.hum and spd.hum.Parent then spd.hum.WalkSpeed = spd.orig or 16 end
+		spd.hum = nil
+	end
+end)
 
 -- Jumping Air
-function MW:StartJumpAir()
-    self._jumpConn = UserInputService.JumpRequest:Connect(function()
-        if not SM:Get("JumpAir") then return end
-        local hum = getHum()
-        if hum then
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-        end
-    end)
-end
-function MW:StopJumpAir()
-    if self._jumpConn then self._jumpConn:Disconnect(); self._jumpConn=nil end
-end
+local lastJump = 0
+State.listen("JumpAir", function(on)
+	if on then
+		Conn.set("jump", UIS.JumpRequest, function()
+			local h = Util.hum()
+			if h and os.clock() - lastJump > 0.15 then
+				lastJump = os.clock()
+				h.PlatformStand = false
+				h:ChangeState(Enum.HumanoidStateType.Jumping) -- không khóa trạng thái => vẫn di chuyển được
+			end
+		end)
+	else
+		Conn.drop("jump")
+	end
+end)
 
 -- Night Vision
-function MW:StartNightVision()
-    self._nightSnap = {
-        ambient      = Lighting.Ambient,
-        brightness   = Lighting.Brightness,
-        outdoorAmbient= Lighting.OutdoorAmbient,
-        fogEnd       = Lighting.FogEnd,
-    }
-    Lighting.Ambient       = Color3.fromRGB(255,255,255)
-    Lighting.Brightness    = 2
-    Lighting.OutdoorAmbient= Color3.fromRGB(255,255,255)
-    Lighting.FogEnd        = 10000
-end
-function MW:StopNightVision()
-    if self._nightSnap.ambient then
-        Lighting.Ambient        = self._nightSnap.ambient
-        Lighting.Brightness     = self._nightSnap.brightness
-        Lighting.OutdoorAmbient = self._nightSnap.outdoorAmbient
-        Lighting.FogEnd         = self._nightSnap.fogEnd
-    end
-end
-
--- Fix Lag: tắt particle, shadow, hiệu ứng nặng
-function MW:StartFixLag()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ParticleEmitter") or obj:IsA("Trail")
-            or obj:IsA("Smoke") or obj:IsA("Sparkles") or obj:IsA("Fire") then
-            SM:Snap("FixLag_"..obj:GetFullName().."_enabled", obj.Enabled)
-            obj.Enabled = false
-        end
-    end
-    Lighting.GlobalShadows = false
-end
-function MW:StopFixLag()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ParticleEmitter") or obj:IsA("Trail")
-            or obj:IsA("Smoke") or obj:IsA("Sparkles") or obj:IsA("Fire") then
-            local orig = SM:Load("FixLag_"..obj:GetFullName().."_enabled")
-            obj.Enabled = (orig == nil) and true or orig
-        end
-    end
-    Lighting.GlobalShadows = true
-end
-
---------------------------------------------------------------------------------
--- MODULE: UIController
---------------------------------------------------------------------------------
-local GREEN = Color3.fromRGB(0,255,0)
-local BLACK = Color3.fromRGB(0,0,0)
-local GRAY  = Color3.fromRGB(40,40,40)
-
-local gui = Instance.new("ScreenGui")
-gui.Name           = "HpTeamProV1"
-gui.ResetOnSpawn   = false
-gui.IgnoreGuiInset = true
-gui.Parent         = lp:WaitForChild("PlayerGui")
-
--- Frame chính
-local mainFrame = Instance.new("Frame")
-mainFrame.Size            = UDim2.fromOffset(280, 400)
-mainFrame.Position        = UDim2.fromScale(0.02, 0.1)
-mainFrame.BackgroundColor3= BLACK
-mainFrame.BorderSizePixel = 0
-mainFrame.ClipsDescendants= true
-mainFrame.Parent          = gui
-
-local mainStroke = Instance.new("UIStroke")
-mainStroke.Color     = GREEN
-mainStroke.Thickness = 2
-mainStroke.Parent    = mainFrame
-
--- Titlebar
-local titleBar = Instance.new("Frame")
-titleBar.Size            = UDim2.new(1,0,0,30)
-titleBar.BackgroundColor3= BLACK
-titleBar.BorderSizePixel = 0
-titleBar.Parent          = mainFrame
-
-local titleLabel = Instance.new("TextLabel")
-titleLabel.Size               = UDim2.new(1,-70,1,0)
-titleLabel.Position           = UDim2.fromOffset(8,0)
-titleLabel.BackgroundTransparency=1
-titleLabel.Text               = "Hằng Chân Ngắn Pro V3"
-titleLabel.TextColor3         = GREEN
-titleLabel.Font               = Enum.Font.GothamBold
-titleLabel.TextSize           = 14
-titleLabel.TextXAlignment      = Enum.TextXAlignment.Left
-titleLabel.Parent             = titleBar
-
-local function makeTopBtn(txt, xOff)
-    local b = Instance.new("TextButton")
-    b.Size            = UDim2.fromOffset(28,22)
-    b.Position        = UDim2.new(1,xOff,0,4)
-    b.BackgroundColor3= BLACK
-    b.Text            = txt
-    b.TextColor3      = GREEN
-    b.Font            = Enum.Font.GothamBold
-    b.TextSize        = 14
-    b.Parent          = titleBar
-    local s=Instance.new("UIStroke"); s.Color=GREEN; s.Parent=b
-    return b
-end
-local minBtn   = makeTopBtn("-",-64)
-local closeBtn = makeTopBtn("X",-32)
-
--- Kéo menu
-local dragging,dragStart,startPos
-titleBar.InputBegan:Connect(function(inp)
-    if inp.UserInputType==Enum.UserInputType.MouseButton1
-       or inp.UserInputType==Enum.UserInputType.Touch then
-        dragging=true; dragStart=inp.Position; startPos=mainFrame.Position
-        inp.Changed:Connect(function()
-            if inp.UserInputState==Enum.UserInputState.End then dragging=false end
-        end)
-    end
-end)
-UserInputService.InputChanged:Connect(function(inp)
-    if dragging and (inp.UserInputType==Enum.UserInputType.MouseMovement
-       or inp.UserInputType==Enum.UserInputType.Touch) then
-        local d=inp.Position-dragStart
-        mainFrame.Position=UDim2.new(
-            startPos.X.Scale,startPos.X.Offset+d.X,
-            startPos.Y.Scale,startPos.Y.Offset+d.Y)
-    end
+State.listen("NightVision", function(on)
+	if on then
+		State.save("Night", function()
+			local s = {}
+			for _, k in { "Brightness", "ClockTime", "FogStart", "FogEnd", "GlobalShadows", "Ambient", "OutdoorAmbient", "ExposureCompensation" } do s[k] = Lighting[k] end
+			s.atmo = {}
+			for _, a in Lighting:GetChildren() do
+				if a:IsA("Atmosphere") then s.atmo[a] = { a.Density, a.Haze } end
+			end
+			return s
+		end)
+		Lighting.Brightness, Lighting.ClockTime, Lighting.FogStart, Lighting.FogEnd = 2, 14, 1e5, 1e6
+		Lighting.GlobalShadows, Lighting.Ambient, Lighting.OutdoorAmbient = false, Color3.new(1, 1, 1), Color3.new(1, 1, 1)
+		for _, a in Lighting:GetChildren() do
+			if a:IsA("Atmosphere") then a.Density, a.Haze = 0, 0 end
+		end
+	else
+		local s = State.take("Night")
+		if s then
+			for k, v in pairs(s) do if k ~= "atmo" then Lighting[k] = v end end
+			for a, vals in pairs(s.atmo) do if a.Parent then a.Density, a.Haze = vals[1], vals[2] end end
+		end
+	end
 end)
 
--- Thu nhỏ / mở rộng
-local minimized=false
-minBtn.MouseButton1Click:Connect(function()
-    minimized=not minimized
-    mainFrame.Size=minimized and UDim2.fromOffset(280,30) or UDim2.fromOffset(280,400)
-end)
-closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
-
--- Tab bar
-local tabBar = Instance.new("Frame")
-tabBar.Size            = UDim2.new(1,0,0,28)
-tabBar.Position        = UDim2.fromOffset(0,30)
-tabBar.BackgroundColor3= GRAY
-tabBar.BorderSizePixel = 0
-tabBar.Parent          = mainFrame
-
-local tabNames = {"Main","Esp","Khác"}
-local tabBtns  = {}
-local tabPages = {}
-
-local function makeTab(name,idx)
-    local btn = Instance.new("TextButton")
-    btn.Size            = UDim2.new(1/#tabNames,0,1,0)
-    btn.Position        = UDim2.new((idx-1)/#tabNames,0,0,0)
-    btn.BackgroundColor3= GRAY
-    btn.Text            = name
-    btn.TextColor3      = GREEN
-    btn.Font            = Enum.Font.GothamBold
-    btn.TextSize        = 13
-    btn.BorderSizePixel = 0
-    btn.Parent          = tabBar
-    return btn
+-- Fix Lag (disable có snapshot, không xóa => khôi phục được)
+local lagOrig = setmetatable({}, { __mode = "k" })
+local LAG_CLASSES = { "ParticleEmitter", "Trail", "Beam", "Smoke", "Fire", "Sparkles", "BloomEffect", "BlurEffect", "SunRaysEffect", "DepthOfFieldEffect" }
+local lagToken = 0
+local function lagHandle(inst)
+	for _, cls in LAG_CLASSES do
+		if inst:IsA(cls) then
+			if lagOrig[inst] == nil then lagOrig[inst] = inst.Enabled end
+			inst.Enabled = false
+			return
+		end
+	end
 end
-
-local scrollContainer = Instance.new("Frame")
-scrollContainer.Size            = UDim2.new(1,0,1,-58)
-scrollContainer.Position        = UDim2.fromOffset(0,58)
-scrollContainer.BackgroundTransparency=1
-scrollContainer.ClipsDescendants= true
-scrollContainer.Parent          = mainFrame
-
-for i,name in ipairs(tabNames) do
-    tabBtns[i] = makeTab(name,i)
-    local scroll = Instance.new("ScrollingFrame")
-    scroll.Size              = UDim2.new(1,0,1,0)
-    scroll.BackgroundColor3  = BLACK
-    scroll.BorderSizePixel   = 0
-    scroll.ScrollBarThickness= 4
-    scroll.ScrollBarImageColor3=GREEN
-    scroll.CanvasSize        = UDim2.fromOffset(0,0)
-    scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y
-    scroll.Visible           = i==1
-    scroll.Parent            = scrollContainer
-    tabPages[i]              = scroll
-
-    local layout = Instance.new("UIListLayout")
-    layout.Padding     = UDim.new(0,4)
-    layout.Parent      = scroll
-    local pad = Instance.new("UIPadding")
-    pad.PaddingTop    = UDim.new(0,6)
-    pad.PaddingLeft   = UDim.new(0,6)
-    pad.PaddingRight  = UDim.new(0,6)
-    pad.Parent        = scroll
-end
-
-local activeTab = 1
-local function switchTab(idx)
-    activeTab = idx
-    for i,page in ipairs(tabPages) do
-        page.Visible = i==idx
-        tabBtns[i].BackgroundColor3 = i==idx and Color3.fromRGB(0,80,0) or GRAY
-    end
-end
-switchTab(1)
-for i,btn in ipairs(tabBtns) do
-    btn.MouseButton1Click:Connect(function() switchTab(i) end)
-end
-
--- Helper tạo toggle button
-local function makeToggle(parent, label, onFn, offFn)
-    local row = Instance.new("Frame")
-    row.Size            = UDim2.new(1,0,0,32)
-    row.BackgroundTransparency=1
-    row.Parent          = parent
-
-    local btn = Instance.new("TextButton")
-    btn.Size            = UDim2.new(1,0,1,0)
-    btn.BackgroundColor3= GRAY
-    btn.Text            = "[ OFF ]  "..label
-    btn.TextColor3      = Color3.fromRGB(180,180,180)
-    btn.Font            = Enum.Font.Gotham
-    btn.TextSize        = 13
-    btn.TextXAlignment  = Enum.TextXAlignment.Left
-    btn.BorderSizePixel = 0
-    btn.Parent          = row
-    local pad=Instance.new("UIPadding"); pad.PaddingLeft=UDim.new(0,8); pad.Parent=btn
-
-    local state = false
-    btn.MouseButton1Click:Connect(function()
-        state = not state
-        if state then
-            btn.Text         = "[ ON ]  "..label
-            btn.TextColor3   = GREEN
-            if onFn then onFn() end
-        else
-            btn.Text         = "[ OFF ]  "..label
-            btn.TextColor3   = Color3.fromRGB(180,180,180)
-            if offFn then offFn() end
-        end
-    end)
-    return btn
-end
-
--- Helper tạo slider số
-local function makeSlider(parent, label, default, min, max, onChange)
-    local row = Instance.new("Frame")
-    row.Size            = UDim2.new(1,0,0,42)
-    row.BackgroundTransparency=1
-    row.Parent          = parent
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size               = UDim2.new(1,0,0,18)
-    lbl.BackgroundTransparency=1
-    lbl.Text               = label..": "..default
-    lbl.TextColor3         = GREEN
-    lbl.Font               = Enum.Font.Gotham
-    lbl.TextSize           = 13
-    lbl.TextXAlignment     = Enum.TextXAlignment.Left
-    lbl.Parent             = row
-    local pad=Instance.new("UIPadding"); pad.PaddingLeft=UDim.new(0,8); pad.Parent=lbl
-
-    local track = Instance.new("Frame")
-    track.Size            = UDim2.new(1,-16,0,8)
-    track.Position        = UDim2.new(0,8,0,22)
-    track.BackgroundColor3= GRAY
-    track.BorderSizePixel = 0
-    track.Parent          = row
-
-    local fill = Instance.new("Frame")
-    fill.Size            = UDim2.new((default-min)/(max-min),0,1,0)
-    fill.BackgroundColor3= GREEN
-    fill.BorderSizePixel = 0
-    fill.Parent          = track
-
-    local knob = Instance.new("TextButton")
-    knob.Size            = UDim2.fromOffset(12,12)
-    knob.AnchorPoint     = Vector2.new(0.5,0.5)
-    knob.Position        = UDim2.new((default-min)/(max-min),0,0.5,0)
-    knob.BackgroundColor3= Color3.new(1,1,1)
-    knob.Text            = ""
-    knob.BorderSizePixel = 0
-    knob.Parent          = track
-
-    local value  = default
-    local sliding= false
-    knob.MouseButton1Down:Connect(function() sliding=true end)
-    UserInputService.InputEnded:Connect(function(inp)
-        if inp.UserInputType==Enum.UserInputType.MouseButton1 then sliding=false end
-    end)
-    UserInputService.InputChanged:Connect(function(inp)
-        if sliding and inp.UserInputType==Enum.UserInputType.MouseMovement then
-            local trackPos = track.AbsolutePosition
-            local trackW   = track.AbsoluteSize.X
-            local rel      = math.clamp((inp.Position.X - trackPos.X)/trackW,0,1)
-            value = math.floor(min + rel*(max-min))
-            fill.Size         = UDim2.new(rel,0,1,0)
-            knob.Position     = UDim2.new(rel,0,0.5,0)
-            lbl.Text          = label..": "..value
-            if onChange then onChange(value) end
-        end
-    end)
-end
-
---------------------------------------------------------------------------------
--- TAB MAIN
---------------------------------------------------------------------------------
-local p1 = tabPages[1]
-
--- Tele Dron
-makeToggle(p1, "Tele Dron",
-    function() SM:Set("TeleDron",true);  CE:StartTeleDron() end,
-    function() SM:Set("TeleDron",false); CE:StopTeleDron()  end
-)
-makeSlider(p1,"Drone Height",10,2,50,function(v) SM.Params.DroneHeight=v end)
-
--- Hitbox All Mod
-makeToggle(p1, "Hitbox All Mod",
-    function() SM:Set("HitboxAll",true);  CE:StartHitbox() end,
-    function() SM:Set("HitboxAll",false); CE:StopHitbox()  end
-)
-makeSlider(p1,"Hitbox Size",10,5,50,function(v) SM.Params.HitboxSize=v end)
-
--- Tele Kill
-makeToggle(p1, "Tele Kill",
-    function() SM:Set("TeleKill",true);  CE:StartTeleKill() end,
-    function() SM:Set("TeleKill",false); CE:StopTeleKill()  end
-)
-
--- Aimbot
-makeToggle(p1, "Aimbot",
-    function() SM:Set("Aimbot",true);  CE:StartAimbot() end,
-    function() SM:Set("Aimbot",false); CE:StopAimbot()  end
-)
-
--- Model Độn Thổ
-makeToggle(p1, "Model Độn Thổ",
-    function() SM:Set("BuryMod",true);  CE:StartBury() end,
-    function() SM:Set("BuryMod",false); CE:StopBury()  end
-)
-makeSlider(p1,"Độ sâu (studs)",-5,-30,0,function(v) SM.Params.BuryDepth=v end)
-
--- Model Head Down
-makeToggle(p1, "Model Head Down",
-    function() SM:Set("HeadDown",true);  CE:StartHeadDown() end,
-    function() SM:Set("HeadDown",false); CE:StopHeadDown()  end
-)
-makeSlider(p1,"Head Depth",3,1,15,function(v) SM.Params.HeadDownDepth=v end)
-
---------------------------------------------------------------------------------
--- TAB ESP
---------------------------------------------------------------------------------
-local p2 = tabPages[2]
-
-makeToggle(p2,"Esp Line",
-    function() SM:Set("EspLine",true) end,
-    function() SM:Set("EspLine",false) end)
-
-makeToggle(p2,"Esp Box",
-    function() SM:Set("EspBox",true) end,
-    function() SM:Set("EspBox",false) end)
-
-makeToggle(p2,"Esp Name",
-    function() SM:Set("EspName",true) end,
-    function() SM:Set("EspName",false) end)
-
-makeToggle(p2,"Esp Distance",
-    function() SM:Set("EspDist",true) end,
-    function() SM:Set("EspDist",false) end)
-
-makeToggle(p2,"Esp Hologram",
-    function() SM:Set("EspHolo",true) end,
-    function() SM:Set("EspHolo",false) end)
-
-makeToggle(p2,"Esp Workspace.Items",
-    function() SM:Set("EspWorkspace",true);  EE:StartWorkspaceEsp() end,
-    function() SM:Set("EspWorkspace",false); EE:StopWorkspaceEsp()  end)
-
--- Khởi động EspEngine ngay
-EE:Start()
-
---------------------------------------------------------------------------------
--- TAB KHÁC
---------------------------------------------------------------------------------
-local p3 = tabPages[3]
-
-makeToggle(p3,"Fly Down",
-    function() SM:Set("FlyDown",true);  MW:StartFlyDown() end,
-    function() SM:Set("FlyDown",false); MW:StopFlyDown()  end)
-
-makeToggle(p3,"Fly Dron",
-    function() SM:Set("FlyDron",true);  MW:StartFlyDron() end,
-    function() SM:Set("FlyDron",false); MW:StopFlyDron()  end)
-makeSlider(p3,"Dron Height",6,2,30,function(v) MW._dronHeight=v end)
-
-makeToggle(p3,"No Clip",
-    function() SM:Set("NoClip",true);  MW:StartNoClip() end,
-    function() SM:Set("NoClip",false); MW:StopNoClip()  end)
-
-makeToggle(p3,"Fly Air",
-    function() SM:Set("FlyAir",true);  MW:StartFlyAir() end,
-    function() SM:Set("FlyAir",false); MW:StopFlyAir()  end)
-makeSlider(p3,"Fly Speed",50,10,200,function(v) SM.Params.FlyAirSpeed=v end)
-
--- Fly Air: nút tăng/giảm độ cao trên màn hình
-local flyBtnFrame = Instance.new("Frame")
-flyBtnFrame.Size            = UDim2.fromOffset(80,70)
-flyBtnFrame.Position        = UDim2.new(1,-90,0.5,-35)
-flyBtnFrame.BackgroundTransparency=1
-flyBtnFrame.Visible         = false
-flyBtnFrame.Parent          = gui
-
-local function makeFlyBtn(txt,y)
-    local b=Instance.new("TextButton")
-    b.Size=UDim2.fromOffset(70,28); b.Position=UDim2.fromOffset(0,y)
-    b.BackgroundColor3=BLACK; b.Text=txt; b.TextColor3=GREEN
-    b.Font=Enum.Font.GothamBold; b.TextSize=14; b.BorderSizePixel=0
-    local s=Instance.new("UIStroke"); s.Color=GREEN; s.Parent=b
-    b.Parent=flyBtnFrame; return b
-end
-local flyUpBtn  = makeFlyBtn("▲ Lên",0)
-local flyDnBtn  = makeFlyBtn("▼ Xuống",36)
-
-flyUpBtn.MouseButton1Down:Connect(function()  MW._flyAirUp=true  end)
-flyUpBtn.MouseButton1Up:Connect(function()    MW._flyAirUp=false end)
-flyDnBtn.MouseButton1Down:Connect(function()  MW._flyAirDown=true  end)
-flyDnBtn.MouseButton1Up:Connect(function()    MW._flyAirDown=false end)
-
--- Hiện nút khi Fly Air bật
-RunService.Heartbeat:Connect(function()
-    flyBtnFrame.Visible = SM:Get("FlyAir")
+State.listen("FixLag", function(on)
+	lagToken += 1
+	local token = lagToken
+	if on then
+		State.save("Lag", function()
+			local ok, q = pcall(function() return settings().Rendering.QualityLevel end)
+			return { shadows = Lighting.GlobalShadows, quality = ok and q or nil }
+		end)
+		Lighting.GlobalShadows = false
+		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+		for _, c in Lighting:GetChildren() do lagHandle(c) end
+		Conn.set("lagAdded", Workspace.DescendantAdded, lagHandle)
+		task.spawn(function() -- quét theo lô, có yield để không đơ khung hình
+			local n = 0
+			for _, d in Workspace:GetDescendants() do
+				if token ~= lagToken then return end
+				lagHandle(d)
+				n += 1
+				if n % 400 == 0 then task.wait() end
+			end
+		end)
+	else
+		Conn.drop("lagAdded")
+		for inst, prev in pairs(lagOrig) do
+			if inst.Parent then inst.Enabled = prev end
+			lagOrig[inst] = nil
+		end
+		local s = State.take("Lag")
+		if s then
+			Lighting.GlobalShadows = s.shadows
+			if s.quality then pcall(function() settings().Rendering.QualityLevel = s.quality end) end
+		end
+	end
 end)
 
-makeToggle(p3,"Speed",
-    function()
-        SM:Set("SpeedOn",true)
-        MW:SetSpeed(SM.Params.WalkSpeed)
-    end,
-    function()
-        SM:Set("SpeedOn",false)
-        MW:ResetSpeed()
-    end)
-makeSlider(p3,"Walk Speed",16,16,200,function(v)
-    SM.Params.WalkSpeed=v
-    if SM:Get("SpeedOn") then MW:SetSpeed(v) end
+-- Hồi sinh: bỏ snapshot nhân vật cũ, noclip áp lại ở nhân vật mới
+LP.CharacterAdded:Connect(function()
+	table.clear(Move.noclipOrig)
+	RT.Vertical = 0
 end)
 
-makeToggle(p3,"Jumping Air",
-    function() SM:Set("JumpAir",true);  MW:StartJumpAir() end,
-    function() SM:Set("JumpAir",false); MW:StopJumpAir()  end)
-
-makeToggle(p3,"Night Vision",
-    function() SM:Set("NightVision",true);  MW:StartNightVision() end,
-    function() SM:Set("NightVision",false); MW:StopNightVision()  end)
-
-makeToggle(p3,"Fix Lag",
-    function() SM:Set("FixLag",true);  MW:StartFixLag() end,
-    function() SM:Set("FixLag",false); MW:StopFixLag()  end)
-
 --------------------------------------------------------------------------------
--- Dọn dẹp khi character respawn
+-- UIController
 --------------------------------------------------------------------------------
-lp.CharacterAdded:Connect(function()
-    -- Tắt fly và noclip để không bị kẹt sau respawn
-    SM:Set("FlyAir",false);  MW:StopFlyAir()
-    SM:Set("FlyDron",false); MW:StopFlyDron()
-    SM:Set("NoClip",false);  MW:StopNoClip()
-    SM:Set("FlyDown",false); MW:StopFlyDown()
+local UI = { refreshers = {} }
+local C = {
+	bg = Color3.fromRGB(22, 22, 28), bar = Color3.fromRGB(34, 34, 44), row = Color3.fromRGB(32, 32, 40),
+	on = Color3.fromRGB(60, 180, 100), off = Color3.fromRGB(150, 60, 60), text = Color3.fromRGB(235, 235, 240),
+	accent = Color3.fromRGB(90, 120, 255),
+}
+local function new(class, props, parent)
+	local o = Instance.new(class)
+	for k, v in pairs(props) do o[k] = v end
+	o.Parent = parent
+	return o
+end
+local function round(o, r) new("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o) end
+
+local gui = new("ScreenGui", { Name = "DebugConsole", ResetOnSpawn = false, DisplayOrder = 100, IgnoreGuiInset = true }, LP:WaitForChild("PlayerGui"))
+local main = new("Frame", { Size = UDim2.fromOffset(300, 410), Position = UDim2.fromOffset(20, 80), BackgroundColor3 = C.bg, BorderSizePixel = 0 }, gui)
+round(main, 10)
+local top = new("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.bar, BorderSizePixel = 0 }, main)
+round(top, 10)
+new("TextLabel", { Size = UDim2.new(1, -80, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = "Debug Console", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left }, top)
+local btnCollapse = new("TextButton", { Size = UDim2.fromOffset(28, 24), Position = UDim2.new(1, -66, 0, 4), BackgroundColor3 = C.row, Text = "—", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14 }, top)
+local btnClose = new("TextButton", { Size = UDim2.fromOffset(28, 24), Position = UDim2.new(1, -34, 0, 4), BackgroundColor3 = C.off, Text = "X", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14 }, top)
+round(btnCollapse, 5) round(btnClose, 5)
+local content = new("Frame", { Size = UDim2.new(1, 0, 1, -32), Position = UDim2.fromOffset(0, 32), BackgroundTransparency = 1 }, main)
+
+-- Kéo thả menu bằng thanh tiêu đề (chuột + cảm ứng)
+top.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		local startPos, origin = input.Position, main.Position
+		Conn.set("uiDrag", UIS.InputChanged, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+				local d = i.Position - startPos
+				main.Position = UDim2.new(origin.X.Scale, origin.X.Offset + d.X, origin.Y.Scale, origin.Y.Offset + d.Y)
+			end
+		end)
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then Conn.drop("uiDrag") end
+		end)
+	end
 end)
 
-print("[HpTeamProV1] Đã tải xong.")
+local collapsed = false
+btnCollapse.MouseButton1Click:Connect(function()
+	collapsed = not collapsed
+	content.Visible = not collapsed
+	main.Size = collapsed and UDim2.fromOffset(300, 32) or UDim2.fromOffset(300, 410)
+end)
+
+-- Tab
+local tabBar = new("Frame", { Size = UDim2.new(1, -16, 0, 28), Position = UDim2.fromOffset(8, 4), BackgroundTransparency = 1 }, content)
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6) }, tabBar)
+local pages, tabBtns = {}, {}
+local function selectTab(name)
+	for n, p in pairs(pages) do p.Visible = (n == name) end
+	for n, b in pairs(tabBtns) do b.BackgroundColor3 = (n == name) and C.accent or C.row end
+end
+for _, name in { "Main", "Esp", "Khác" } do
+	local b = new("TextButton", { Size = UDim2.new(1 / 3, -4, 1, 0), BackgroundColor3 = C.row, Text = name, TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 13 }, tabBar)
+	round(b, 6)
+	tabBtns[name] = b
+	local p = new("ScrollingFrame", {
+		Size = UDim2.new(1, -16, 1, -42), Position = UDim2.fromOffset(8, 38), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = false,
+	}, content)
+	new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, p)
+	pages[name] = p
+	b.MouseButton1Click:Connect(function() selectTab(name) end)
+end
+
+-- Hàng chức năng + nút ▲▼ để sắp xếp lại thứ tự tự do
+local function reorder(page, row, dir)
+	local rows = {}
+	for _, r in page:GetChildren() do if r:IsA("Frame") then rows[#rows + 1] = r end end
+	table.sort(rows, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+	local i = table.find(rows, row)
+	local j = i and i + dir
+	if i and rows[j] then row.LayoutOrder, rows[j].LayoutOrder = rows[j].LayoutOrder, row.LayoutOrder end
+end
+local orderCounter = 0
+local function addRow(page, label)
+	orderCounter += 10
+	local row = new("Frame", { Size = UDim2.new(1, -6, 0, 32), BackgroundColor3 = C.row, LayoutOrder = orderCounter, BorderSizePixel = 0 }, page)
+	round(row)
+	new("TextLabel", { Size = UDim2.new(1, -110, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, Text = label, TextColor3 = C.text, Font = Enum.Font.Gotham, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left }, row)
+	for k, dir in ipairs({ -1, 1 }) do
+		local b = new("TextButton", { Size = UDim2.fromOffset(18, 24), Position = UDim2.new(1, -44 + (k - 1) * 20, 0, 4), BackgroundColor3 = C.bar, Text = dir < 0 and "▲" or "▼", TextColor3 = C.text, TextSize = 9, Font = Enum.Font.GothamBold }, row)
+		round(b, 4)
+		b.MouseButton1Click:Connect(function() reorder(page, row, dir) end)
+	end
+	return row
+end
+local function toggleRow(tab, label, flag)
+	local row = addRow(pages[tab], label)
+	local btn = new("TextButton", { Size = UDim2.fromOffset(50, 24), Position = UDim2.new(1, -98, 0, 4), Text = "OFF", TextColor3 = C.text, BackgroundColor3 = C.off, Font = Enum.Font.GothamBold, TextSize = 12 }, row)
+	round(btn, 5)
+	local function paint(on) btn.Text, btn.BackgroundColor3 = on and "ON" or "OFF", on and C.on or C.off end
+	State.listen(flag, paint) -- giữ UI đồng bộ cả khi bị tắt do loại trừ lẫn nhau
+	btn.MouseButton1Click:Connect(function() State.set(flag, not F[flag]) end)
+end
+local function numberRow(tab, label, key, min, max)
+	local row = addRow(pages[tab], label)
+	local box = new("TextBox", { Size = UDim2.fromOffset(50, 24), Position = UDim2.new(1, -98, 0, 4), Text = tostring(Cfg[key]), TextColor3 = C.text, BackgroundColor3 = C.bar, Font = Enum.Font.Gotham, TextSize = 12, ClearTextOnFocus = false }, row)
+	round(box, 5)
+	box.FocusLost:Connect(function()
+		local n = tonumber(box.Text)
+		if n then Cfg[key] = math.clamp(n, min, max) end -- chỉ nhận số hợp lệ
+		box.Text = tostring(math.floor(Cfg[key] * 10) / 10)
+	end)
+	table.insert(UI.refreshers, function() if not box:IsFocused() then box.Text = tostring(math.floor(Cfg[key] * 10) / 10) end end)
+end
+
+toggleRow("Main", "Tele Dron", "TeleDron")
+numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
+toggleRow("Main", "Hitbox All Mod", "HitboxAll")
+numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
+toggleRow("Main", "All Mod Im", "AllModIm")
+toggleRow("Main", "Tele Kill", "TeleKill")
+toggleRow("Main", "Aimbot", "Aimbot")
+numberRow("Main", "  Phạm vi quét", "ScanRange", 10, 500)
+
+toggleRow("Esp", "Esp Line", "EspLine")
+toggleRow("Esp", "Esp Box", "EspBox")
+toggleRow("Esp", "Esp Name", "EspName")
+toggleRow("Esp", "Esp Distance", "EspDistance")
+toggleRow("Esp", "Esp Hologram", "EspHologram")
+toggleRow("Esp", "Esp Workspace", "EspWorkspace")
+
+toggleRow("Khác", "Fly Down", "FlyDown")
+numberRow("Khác", "  Độ sâu Fly Down", "FlyDownDepth", -150, 150)
+toggleRow("Khác", "Fly Dron", "FlyDron")
+numberRow("Khác", "  Độ cao Fly Dron", "DroneHeight", 1, 300)
+toggleRow("Khác", "No Clip", "NoClip")
+toggleRow("Khác", "Fly Air", "FlyAir")
+numberRow("Khác", "Fly Speed", "FlySpeed", 1, 500)
+toggleRow("Khác", "Speed", "Speed")
+numberRow("Khác", "  WalkSpeed", "WalkSpeed", 1, 500)
+toggleRow("Khác", "Jumping Air", "JumpAir")
+toggleRow("Khác", "Night Vision", "NightVision")
+toggleRow("Khác", "Fix Lag", "FixLag")
+selectTab("Main")
+
+-- Cụm nút tăng/giảm độ cao trên màn hình (hiện khi bật Fly Air / Dron / Down)
+local pad = new("Frame", { Size = UDim2.fromOffset(60, 124), Position = UDim2.new(1, -80, 0.5, -62), BackgroundTransparency = 1, Visible = false }, gui)
+local function padBtn(text, y, val)
+	local b = new("TextButton", { Size = UDim2.fromOffset(60, 56), Position = UDim2.fromOffset(0, y), BackgroundColor3 = C.accent, BackgroundTransparency = 0.25, Text = text, TextColor3 = C.text, TextSize = 24, Font = Enum.Font.GothamBold }, pad)
+	round(b, 10)
+	b.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then RT.Vertical = val end
+	end)
+	b.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			if RT.Vertical == val then RT.Vertical = 0 end -- thả nút => dừng hẳn, không tự tăng/giảm
+		end
+	end)
+end
+padBtn("▲", 0, 1)
+padBtn("▼", 68, -1)
+for _, f in { "FlyAir", "FlyDron", "FlyDown" } do
+	State.listen(f, function() pad.Visible = F.FlyAir or F.FlyDron or F.FlyDown or false end)
+end
+-- Phím tắt: Space lên, LeftControl xuống
+Conn.set("keysDown", UIS.InputBegan, function(i, gp)
+	if gp then return end
+	if i.KeyCode == Enum.KeyCode.Space then RT.Vertical = 1 elseif i.KeyCode == Enum.KeyCode.LeftControl then RT.Vertical = -1 end
+end)
+Conn.set("keysUp", UIS.InputEnded, function(i)
+	if i.KeyCode == Enum.KeyCode.Space or i.KeyCode == Enum.KeyCode.LeftControl then RT.Vertical = 0 end
+end)
+
+-- Đồng bộ ô số với giá trị thay đổi tự động (độ cao Dron / độ sâu Down)
+local refreshAcc = 0
+Conn.set("uiRefresh", RunService.Heartbeat, function(dt)
+	refreshAcc += dt
+	if refreshAcc < 0.25 then return end
+	refreshAcc = 0
+	for _, fn in UI.refreshers do fn() end
+end)
+
+-- Nút X: tắt toàn bộ tính năng, khôi phục mọi thứ, ngắt mọi kết nối rồi hủy giao diện
+btnClose.MouseButton1Click:Connect(function()
+	for flag in pairs(F) do State.set(flag, false) end
+	Esp.clearAll()
+	Conn.dropAll()
+	if espGui then espGui:Destroy() end
+	if hlFolder then hlFolder:Destroy() end
+	gui:Destroy()
+end)
