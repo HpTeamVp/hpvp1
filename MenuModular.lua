@@ -1,940 +1,1731 @@
 --[[
-  Hp Team Pro V1 - Menu debug/test (LocalScript)
-  Đặt vào: StarterPlayer > StarterPlayerScripts
-  Module (trong 1 file): Janitor, StateManager, TargetScanner, NoClip, CombatEngine,
-                         EspEngine, MovementAndWorld (Features), UIController
-  Cắm cơ chế tấn công của game: sửa hàm Combat.AttackHook(target, mode) ở mục COMBAT.
+    ModularControlMenu.lua
+    Bộ công cụ Debug & QA Testing nội bộ (chỉ chạy cho chủ game / Studio).
+    Modules: StateManager, TargetScanner, CombatEngine, EspEngine, MovementAndWorld, UIController
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
+local UserInputService = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 
-local LP = Players.LocalPlayer
-local PlayerGui = LP:WaitForChild("PlayerGui")
+local LocalPlayer = Players.LocalPlayer
 
--- =====================================================================
--- JANITOR: gom connection/instance/hàm để dọn sạch, tránh rò rỉ khi bật/tắt nhiều lần
--- =====================================================================
-local Janitor = {}
-Janitor.__index = Janitor
-function Janitor.new() return setmetatable({ _t = {} }, Janitor) end
-function Janitor:Add(x) table.insert(self._t, x) return x end
-function Janitor:Clean()
-	for _, x in ipairs(self._t) do
-		local t = typeof(x)
-		if t == "RBXScriptConnection" then x:Disconnect()
-		elseif t == "Instance" then pcall(function() x:Destroy() end)
-		elseif t == "function" then pcall(x) end
-	end
-	table.clear(self._t)
+----------------------------------------------------------------------
+-- OWNER GATE
+----------------------------------------------------------------------
+local function IsOwner()
+    if RunService:IsStudio() then
+        return true
+    end
+    if game.CreatorType == Enum.CreatorType.Group then
+        local ok, rank = pcall(function()
+            return LocalPlayer:GetRankInGroup(game.CreatorId)
+        end)
+        return ok and rank >= 255
+    end
+    return LocalPlayer.UserId == game.CreatorId
 end
 
--- =====================================================================
--- STATE MANAGER: cờ bật/tắt + cấu hình + vòng đời Start/Stop của từng tính năng
--- =====================================================================
-local State = {
-	Flags = {}, Janitors = {}, Features = {}, _cbs = {},
-	Config = {
-		ScanRange = 150, SafeHeight = 12, FlySpeed = 60, WalkSpeed = 16,
-		FlyDronHeight = 6, HitboxSize = 15, AttackInterval = 0.12, FlyDownDepth = 8,
-	},
+if not IsOwner() then
+    return
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+if globalEnv.__ModularControlMenu and globalEnv.__ModularControlMenu.Shutdown then
+    pcall(globalEnv.__ModularControlMenu.Shutdown)
+end
+
+----------------------------------------------------------------------
+-- SHARED HELPERS
+----------------------------------------------------------------------
+local Connections = {}
+local function Track(conn)
+    table.insert(Connections, conn)
+    return conn
+end
+
+local function GetCharacter()
+    local char = LocalPlayer.Character
+    if not char then return nil, nil, nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    return char, hum, hrp
+end
+
+local function GetGuiParent()
+    local ok, result = pcall(function()
+        if gethui then return gethui() end
+        return game:GetService("CoreGui")
+    end)
+    if ok and result then
+        return result
+    end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local function GetModelRoot(model)
+    return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+end
+
+local function GetAimPosition(model)
+    local head = model:FindFirstChild("Head")
+    if head and head:IsA("BasePart") then
+        return head.Position
+    end
+    local root = GetModelRoot(model)
+    return root and root.Position or model:GetPivot().Position
+end
+
+----------------------------------------------------------------------
+-- StateManager
+----------------------------------------------------------------------
+local StateManager = {}
+StateManager.Config = {
+    ScanRange = 150,
+    DroneHeightOffset = 12,
+    FlySpeed = 60,
+    WalkSpeed = 40,
+    FireInterval = 0.15,
+    KillOffset = 4,
+    AimSmoothness = 0.25,
+    HitboxSize = 20,       -- kích thước hitbox mở rộng (studs, mỗi cạnh)
+    FlyDronHeight = 6,     -- độ cao giữ cố định so với mặt đất (mặc định 6)
+    FlyDownDepth = 8,      -- độ sâu hạ xuống dưới mặt đất khi bật Fly Down
+    FlyAdjustRate = 12,    -- tốc độ tăng/giảm độ cao (studs/giây) khi giữ nút
 }
--- Các tính năng điều khiển vị trí nhân vật: chỉ cho phép 1 cái chạy cùng lúc (tránh tranh CFrame)
-local EXCLUSIVE = { TeleDron = true, TeleKill = true, FlyDown = true, FlyDron = true, FlyAir = true }
+StateManager.Flags = {}
+StateManager.Snapshot = {}
 
-function State.OnChange(fn) table.insert(State._cbs, fn) end
-
-function State.Set(name, on)
-	local f = State.Features[name]
-	if not f then return end
-	on = on and true or false
-	if (State.Flags[name] or false) == on then return end
-	if on and EXCLUSIVE[name] then
-		for other in pairs(EXCLUSIVE) do
-			if other ~= name and State.Flags[other] then State.Set(other, false) end
-		end
-	end
-	State.Flags[name] = on
-	if on then
-		local j = Janitor.new()
-		State.Janitors[name] = j
-		local ok, err = pcall(f.Start, j)
-		if not ok then -- lỗi khi bật: dọn sạch và trả về OFF
-			warn("[HpTeamPro] " .. name .. ": " .. tostring(err))
-			j:Clean(); State.Janitors[name] = nil; State.Flags[name] = false
-			if f.Stop then pcall(f.Stop) end
-		end
-	else
-		local j = State.Janitors[name]
-		if j then j:Clean(); State.Janitors[name] = nil end
-		if f.Stop then pcall(f.Stop) end -- khôi phục Snapshot
-	end
-	for _, cb in ipairs(State._cbs) do task.spawn(cb, name) end
-end
-
--- =====================================================================
--- HELPER NHÂN VẬT
--- =====================================================================
-local function getChar()
-	local c = LP.Character
-	if not c then return end
-	local h = c:FindFirstChildOfClass("Humanoid")
-	local r = c:FindFirstChild("HumanoidRootPart")
-	if h and r and h.Health > 0 then return c, h, r end
-end
-local function planar(h) local d = h.MoveDirection return Vector3.new(d.X, 0, d.Z) end
-local function camYaw()
-	local l = Workspace.CurrentCamera.CFrame.LookVector
-	return math.atan2(-l.X, -l.Z)
-end
-local function standUp(pos) -- đặt nhân vật đứng thẳng, trả PlatformStand về false
-	local _, h, r = getChar()
-	if r then
-		r.CFrame = CFrame.new(pos) * CFrame.Angles(0, camYaw(), 0)
-		r.AssemblyLinearVelocity = Vector3.zero
-		r.AssemblyAngularVelocity = Vector3.zero
-	end
-	if h then h.PlatformStand = false end
-end
--- Lực triệt tiêu trọng lực để lơ lửng ổn định (không tự rơi/trôi)
-local function makeHold(j, r)
-	local a = j:Add(Instance.new("Attachment")); a.Parent = r
-	local f = j:Add(Instance.new("VectorForce"))
-	f.Attachment0 = a; f.RelativeTo = Enum.ActuatorRelativeTo.World
-	f.ApplyAtCenterOfMass = true; f.Force = Vector3.zero; f.Parent = r
-	return function() f.Force = Vector3.new(0, Workspace.Gravity * r.AssemblyMass, 0) end
-end
-
--- =====================================================================
--- TARGET SCANNER: quét theo chu kỳ + cache, dùng GetPartBoundsInRadius (không quét toàn workspace)
--- =====================================================================
-local Scanner = { _list = {}, _t = 0, Interval = 0.15 }
-local overlap = OverlapParams.new()
-overlap.FilterType = Enum.RaycastFilterType.Exclude
-
-function Scanner.Valid(m, fromPos)
-	if not m or not m.Parent or m == LP.Character then return false end
-	if Players:GetPlayerFromCharacter(m) then return false end -- bỏ người chơi khác
-	local hum = m:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then return false end
-	local root = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-	if not root then return false end
-	if fromPos and (root.Position - fromPos).Magnitude > State.Config.ScanRange then return false end
-	return true, hum, root
-end
-
-function Scanner.Get()
-	local now = os.clock()
-	if now - Scanner._t < Scanner.Interval then return Scanner._list end
-	Scanner._t = now
-	local list = {}
-	local c, _, r = getChar()
-	if r then
-		overlap.FilterDescendantsInstances = { c }
-		local seen = {}
-		for _, p in ipairs(Workspace:GetPartBoundsInRadius(r.Position, State.Config.ScanRange, overlap)) do
-			local m = p:FindFirstAncestorOfClass("Model")
-			if m and not seen[m] then
-				seen[m] = true
-				local ok, hum, root = Scanner.Valid(m, r.Position)
-				if ok then
-					table.insert(list, { Model = m, Humanoid = hum, Root = root,
-						Dist = (root.Position - r.Position).Magnitude })
-				end
-			end
-		end
-		table.sort(list, function(a, b) return a.Dist < b.Dist end) -- ưu tiên gần nhất
-	end
-	Scanner._list = list
-	return list
-end
-
--- =====================================================================
--- NOCLIP (đếm tham chiếu, khôi phục CanCollide gốc chính xác)
--- =====================================================================
-local NoClip = { refs = {}, conn = nil, orig = nil }
-function NoClip.Acquire(k)
-	NoClip.refs[k] = true
-	if NoClip.conn then return end
-	NoClip.orig = setmetatable({}, { __mode = "k" })
-	NoClip.conn = RunService.Stepped:Connect(function()
-		local c = LP.Character
-		if not c then return end
-		for _, p in ipairs(c:GetDescendants()) do
-			if p:IsA("BasePart") then
-				if NoClip.orig[p] == nil then NoClip.orig[p] = p.CanCollide end
-				p.CanCollide = false
-			end
-		end
-	end)
-end
-function NoClip.Release(k)
-	NoClip.refs[k] = nil
-	if next(NoClip.refs) then return end
-	if NoClip.conn then NoClip.conn:Disconnect(); NoClip.conn = nil end
-	for p, v in pairs(NoClip.orig or {}) do if p.Parent then p.CanCollide = v end end
-	NoClip.orig = nil
-end
-
--- Điều khiển lên/xuống (nút trên màn hình + phím E/Q)
-local Move = { Up = false, Down = false }
-function Move.Axis() return (Move.Up and 1 or 0) - (Move.Down and 1 or 0) end
-
--- =====================================================================
--- COMBAT ENGINE
--- =====================================================================
-local Combat = { Target = nil, _last = 0 }
-
--- >>> CẮM CƠ CHẾ TẤN CÔNG CỦA GAME VÀO ĐÂY <<<
--- target = { Model, Humanoid, Root, Dist }; mode = "Dron" | "TeleKill"
--- Mặc định: kích hoạt Tool đang cầm. Ví dụ cắm Remote của game bạn:
---   game.ReplicatedStorage.Remotes.Attack:FireServer(target.Model)
---   hoặc tool.ToolDamageObject:InvokeServer(target.Model, ...) tuỳ game.
-function Combat.AttackHook(target, mode)
-	local c = LP.Character
-	local tool = c and c:FindFirstChildOfClass("Tool")
-	if tool then tool:Activate() end
-end
-
-function Combat.Attack(t, mode) -- giới hạn tần suất + pcall để hook lỗi không làm sập vòng lặp
-	local now = os.clock()
-	if now - Combat._last < State.Config.AttackInterval then return end
-	Combat._last = now
-	local ok, err = pcall(Combat.AttackHook, t, mode)
-	if not ok then warn("[AttackHook] " .. tostring(err)) end
-end
-
--- Khóa mục tiêu: giữ đến khi chết/biến mất/ra khỏi 150, rồi tự chuyển mục tiêu gần nhất
-function Combat.Pick()
-	local _, _, r = getChar()
-	if not r then Combat.Target = nil return end
-	local t = Combat.Target
-	if t and Scanner.Valid(t.Model, r.Position) then return t end
-	Combat.Target = Scanner.Get()[1]
-	return Combat.Target
-end
-
--- =====================================================================
--- MOVEMENT & WORLD + COMBAT FEATURES
--- =====================================================================
-local F = State.Features
-local hbOrig = nil -- bảng gốc của Hitbox (EspEngine dùng để bỏ qua part đã phóng to)
-
-F.TeleDron = {
-	Start = function(j)
-		local _, _, r0 = getChar(); assert(r0, "Chưa có nhân vật")
-		local hold = makeHold(j, r0)
-		j:Add(RunService.Heartbeat:Connect(function()
-			local _, h, r = getChar()
-			if not r then return end
-			local t = Combat.Pick()
-			if not t then h.PlatformStand = false return end
-			h.PlatformStand = true
-			local tp = t.Root.Position
-			-- Tọa độ phía trên mục tiêu để né đòn cận chiến, nhìn thẳng xuống
-			r.CFrame = CFrame.lookAt(tp + Vector3.new(0, State.Config.SafeHeight, 0), tp, Vector3.zAxis)
-			r.AssemblyLinearVelocity = Vector3.zero
-			r.AssemblyAngularVelocity = Vector3.zero
-			hold()
-			Combat.Attack(t, "Dron")
-		end))
-	end,
-	Stop = function() local _, h = getChar(); if h then h.PlatformStand = false end end,
+local flagListeners = {}
+local anyListeners = {}
+local exclusiveGroup = {
+    TeleDron = "Position", TeleKill = "Position",
+    FlyAir = "Position", FlyDown = "Position", FlyDron = "Position",
 }
 
-F.TeleKill = {
-	Start = function(j)
-		j:Add(RunService.Heartbeat:Connect(function()
-			local _, _, r = getChar()
-			if not r then return end
-			local t = Combat.Pick() -- mục tiêu chết -> Pick tự chuyển sang mục tiêu kế
-			if not t then return end
-			local tp = t.Root.Position
-			local pos = (t.Root.CFrame * CFrame.new(0, 0, 5)).Position -- phía sau mục tiêu 5 studs
-			r.CFrame = CFrame.lookAt(pos, Vector3.new(tp.X, pos.Y, tp.Z))
-			r.AssemblyLinearVelocity = Vector3.zero
-			Combat.Attack(t, "TeleKill")
-		end))
-	end,
+function StateManager.OnChanged(name, fn)
+    flagListeners[name] = flagListeners[name] or {}
+    table.insert(flagListeners[name], fn)
+end
+
+function StateManager.OnAnyChanged(fn)
+    table.insert(anyListeners, fn)
+end
+
+function StateManager.Get(name)
+    return StateManager.Flags[name] == true
+end
+
+function StateManager.Set(name, value)
+    value = value and true or false
+    if StateManager.Flags[name] == value then return end
+
+    if value and exclusiveGroup[name] then
+        for other, group in pairs(exclusiveGroup) do
+            if other ~= name and group == exclusiveGroup[name] and StateManager.Flags[other] then
+                StateManager.Set(other, false)
+            end
+        end
+    end
+
+    StateManager.Flags[name] = value
+    for _, fn in ipairs(flagListeners[name] or {}) do
+        task.spawn(fn, value)
+    end
+    for _, fn in ipairs(anyListeners) do
+        task.spawn(fn, name, value)
+    end
+end
+
+function StateManager.Toggle(name)
+    StateManager.Set(name, not StateManager.Flags[name])
+end
+
+function StateManager.SetConfig(key, value, minV, maxV)
+    if type(value) ~= "number" then return StateManager.Config[key] end
+    if minV then value = math.max(minV, value) end
+    if maxV then value = math.min(maxV, value) end
+    StateManager.Config[key] = value
+    return value
+end
+
+function StateManager.AnyEnabled(names)
+    for _, n in ipairs(names) do
+        if StateManager.Flags[n] then return true end
+    end
+    return false
+end
+
+----------------------------------------------------------------------
+-- TargetScanner
+----------------------------------------------------------------------
+local TargetScanner = {}
+TargetScanner.Candidates = {}   -- [Model] = Humanoid
+TargetScanner.Cache = {}        -- sorted list of {Model, Humanoid, Root, Distance}
+TargetScanner.Interval = 0.15
+
+local scanAccumulator = 0
+local SCAN_FEATURES = {
+    "TeleDron", "TeleKill", "Aimbot", "AimMagic", "AutoFire", "HitboxAllMod", "AllModIm",
+    "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram",
 }
 
-F.Aimbot = {
-	Start = function(j)
-		-- Bind sau Camera script để ghim góc nhìn không bị ghi đè; Lerp chống giật khi đổi mục tiêu
-		RunService:BindToRenderStep("HpAimbot", Enum.RenderPriority.Camera.Value + 1, function()
-			local cam = Workspace.CurrentCamera
-			local t = Combat.Pick()
-			if not (cam and t) then return end
-			local aim = (t.Model:FindFirstChild("Head") or t.Root).Position
-			cam.CFrame = cam.CFrame:Lerp(CFrame.lookAt(cam.CFrame.Position, aim), 0.25)
-		end)
-		j:Add(function() RunService:UnbindFromRenderStep("HpAimbot") end)
-	end,
+local function RegisterHumanoid(hum)
+    if not hum:IsA("Humanoid") then return end
+    local model = hum.Parent
+    if model and model:IsA("Model") then
+        TargetScanner.Candidates[model] = hum
+    end
+end
+
+function TargetScanner.Init()
+    for _, d in ipairs(Workspace:GetDescendants()) do
+        if d:IsA("Humanoid") then
+            RegisterHumanoid(d)
+        end
+    end
+    Track(Workspace.DescendantAdded:Connect(function(d)
+        if d:IsA("Humanoid") then
+            task.defer(RegisterHumanoid, d)
+        end
+    end))
+    Track(Workspace.DescendantRemoving:Connect(function(d)
+        if d:IsA("Humanoid") then
+            local model = d.Parent
+            if model then
+                TargetScanner.Candidates[model] = nil
+            end
+        end
+    end))
+end
+
+function TargetScanner.IsValidModel(model, hum, origin)
+    if not model or not model.Parent or not model:IsDescendantOf(Workspace) then return false end
+    if model == LocalPlayer.Character then return false end
+    if Players:GetPlayerFromCharacter(model) ~= nil then return false end
+    if not hum or hum.Parent ~= model or hum.Health <= 0 then return false end
+    local root = GetModelRoot(model)
+    if not root then return false end
+    if origin and (root.Position - origin).Magnitude > StateManager.Config.ScanRange then return false end
+    return true
+end
+
+function TargetScanner.Refresh()
+    local _, _, hrp = GetCharacter()
+    local list = {}
+    if hrp then
+        local origin = hrp.Position
+        for model, hum in pairs(TargetScanner.Candidates) do
+            if TargetScanner.IsValidModel(model, hum, origin) then
+                local root = GetModelRoot(model)
+                table.insert(list, {
+                    Model = model,
+                    Humanoid = hum,
+                    Root = root,
+                    Distance = (root.Position - origin).Magnitude,
+                })
+            elseif not model.Parent then
+                TargetScanner.Candidates[model] = nil
+            end
+        end
+        table.sort(list, function(a, b) return a.Distance < b.Distance end)
+    end
+    TargetScanner.Cache = list
+end
+
+function TargetScanner.GetList()
+    return TargetScanner.Cache
+end
+
+function TargetScanner.GetNearest()
+    return TargetScanner.Cache[1]
+end
+
+function TargetScanner.Step(dt)
+    if not StateManager.AnyEnabled(SCAN_FEATURES) then
+        if #TargetScanner.Cache > 0 then TargetScanner.Cache = {} end
+        return
+    end
+    scanAccumulator += dt
+    if scanAccumulator >= TargetScanner.Interval then
+        scanAccumulator = 0
+        TargetScanner.Refresh()
+    end
+end
+
+----------------------------------------------------------------------
+-- CombatEngine
+----------------------------------------------------------------------
+local CombatEngine = {}
+CombatEngine.Locked = nil -- entry {Model, Humanoid, Root}
+-- CÁCH CẮM CƠ CHẾ TẤN CÔNG CỦA GAME:
+-- Gán CombatEngine.CustomHook = function(target, mode, aimWorldPos) ... end
+--   target       = {Model, Humanoid, Root}
+--   mode         = "TeleDron" | "TeleKill" | "AutoFire" | "AimMagic"
+--   aimWorldPos  = tọa độ thế giới điểm ngắm (đầu/tâm mục tiêu)
+-- Ví dụ: game:GetService("ReplicatedStorage").TestAttack:FireServer(target.Model, aimWorldPos)
+-- Nếu hook không được gán (hoặc lỗi), AttackHook sẽ tự gọi Tool:Activate().
+CombatEngine.CustomHook = nil
+CombatEngine.LastFire = 0
+
+local droneBP, droneBG
+
+function CombatEngine.GetTarget()
+    local _, _, hrp = GetCharacter()
+    if not hrp then
+        CombatEngine.Locked = nil
+        return nil
+    end
+    local locked = CombatEngine.Locked
+    if locked and TargetScanner.IsValidModel(locked.Model, locked.Humanoid, hrp.Position) then
+        return locked
+    end
+    local nearest = TargetScanner.GetNearest()
+    if nearest and TargetScanner.IsValidModel(nearest.Model, nearest.Humanoid, hrp.Position) then
+        CombatEngine.Locked = nearest
+        return nearest
+    end
+    CombatEngine.Locked = nil
+    return nil
+end
+
+function CombatEngine.AttackHook(target, mode, aimWorldPos)
+    if not target then return end
+    if CombatEngine.CustomHook then
+        local ok = pcall(CombatEngine.CustomHook, target, mode, aimWorldPos)
+        if ok then return end
+    end
+    local char, hum = GetCharacter()
+    if not char or not hum then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        local candidate = backpack and backpack:FindFirstChildOfClass("Tool")
+        if candidate then
+            pcall(function() hum:EquipTool(candidate) end)
+            tool = candidate
+        end
+    end
+    if tool then
+        pcall(function() tool:Activate() end)
+    end
+end
+
+function CombatEngine.Fire(target, mode, aimWorldPos)
+    local now = os.clock()
+    if now - CombatEngine.LastFire < StateManager.Config.FireInterval then return end
+    CombatEngine.LastFire = now
+    CombatEngine.AttackHook(target, mode, aimWorldPos)
+end
+
+local function DestroyDrone()
+    if droneBP then droneBP:Destroy() droneBP = nil end
+    if droneBG then droneBG:Destroy() droneBG = nil end
+end
+
+-- Hitbox All Mod / All Mod Im ----------------------------------------
+-- Lưu ý: đây là thay đổi phía client (Snapshot + khôi phục sạch khi tắt).
+-- Sát thương thật phụ thuộc cách game phát hiện va chạm (server/client).
+local hitboxSnap = {} -- [BasePart] = {Size, CanCollide, Transparency, Massless}
+local freezeSnap = {} -- [Humanoid] = {WalkSpeed, JumpPower, JumpHeight, AutoRotate, Root, Anchored}
+
+local function ExpandPart(part, size)
+    local snap = hitboxSnap[part]
+    if not snap then
+        snap = {
+            Size = part.Size, CanCollide = part.CanCollide,
+            Transparency = part.Transparency, Massless = part.Massless,
+        }
+        hitboxSnap[part] = snap
+    end
+    if part.Size ~= size then part.Size = size end -- hộp lập phương: phủ cả vùng dưới mặt đất
+    if part.CanCollide then part.CanCollide = false end -- không bị tường/vật cản chặn
+    if not part.Massless then part.Massless = true end
+    local t = math.max(snap.Transparency, 0.7)
+    if part.Transparency ~= t then part.Transparency = t end
+end
+
+local function RestoreHitboxPart(part)
+    local snap = hitboxSnap[part]
+    hitboxSnap[part] = nil
+    if snap and part.Parent then
+        pcall(function()
+            part.Size = snap.Size
+            part.CanCollide = snap.CanCollide
+            part.Transparency = snap.Transparency
+            part.Massless = snap.Massless
+        end)
+    end
+end
+
+local function RestoreAllHitboxes()
+    for part in pairs(hitboxSnap) do
+        RestoreHitboxPart(part)
+    end
+end
+
+local function CollectToolHandles(out)
+    local containers = {}
+    if LocalPlayer.Character then table.insert(containers, LocalPlayer.Character) end
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if backpack then table.insert(containers, backpack) end
+    for _, container in ipairs(containers) do
+        for _, tool in ipairs(container:GetChildren()) do
+            if tool:IsA("Tool") then
+                local handle = tool:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    out[handle] = true
+                end
+            end
+        end
+    end
+end
+
+local function FreezeMob(hum, root)
+    if not freezeSnap[hum] then
+        freezeSnap[hum] = {
+            WalkSpeed = hum.WalkSpeed, JumpPower = hum.JumpPower, JumpHeight = hum.JumpHeight,
+            AutoRotate = hum.AutoRotate, Root = root, Anchored = root.Anchored,
+        }
+    end
+    hum.WalkSpeed = 0
+    hum.JumpPower = 0
+    hum.JumpHeight = 0
+    hum.AutoRotate = false
+    root.AssemblyLinearVelocity = Vector3.zero
+    if not root.Anchored then root.Anchored = true end
+end
+
+local function RestoreFreeze(hum)
+    local snap = freezeSnap[hum]
+    freezeSnap[hum] = nil
+    if not snap then return end
+    if hum.Parent then
+        pcall(function()
+            hum.WalkSpeed = snap.WalkSpeed
+            hum.JumpPower = snap.JumpPower
+            hum.JumpHeight = snap.JumpHeight
+            hum.AutoRotate = snap.AutoRotate
+        end)
+    end
+    if snap.Root and snap.Root.Parent then
+        snap.Root.Anchored = snap.Anchored
+    end
+end
+
+local function RestoreAllFreeze()
+    for hum in pairs(freezeSnap) do
+        RestoreFreeze(hum)
+    end
+end
+
+function CombatEngine.StepModifiers()
+    local flags = StateManager.Flags
+    if not (flags.HitboxAllMod or flags.AllModIm) then return end
+    local list = TargetScanner.GetList()
+
+    if flags.HitboxAllMod then
+        local s = StateManager.Config.HitboxSize
+        local size = Vector3.new(s, s, s)
+        local active = {}
+        for _, t in ipairs(list) do
+            active[t.Root] = true
+            ExpandPart(t.Root, size)
+        end
+        local handles = {}
+        CollectToolHandles(handles)
+        for handle in pairs(handles) do
+            active[handle] = true
+            ExpandPart(handle, size)
+        end
+        -- Khôi phục phần tử đã rời phạm vi / chết / bị hủy
+        for part in pairs(hitboxSnap) do
+            if not active[part] then RestoreHitboxPart(part) end
+        end
+    end
+
+    if flags.AllModIm then
+        local active = {}
+        for _, t in ipairs(list) do
+            active[t.Humanoid] = true
+            FreezeMob(t.Humanoid, t.Root)
+        end
+        for hum in pairs(freezeSnap) do
+            if not active[hum] then RestoreFreeze(hum) end
+        end
+    end
+end
+
+function CombatEngine.Init()
+    StateManager.OnChanged("TeleDron", function(on)
+        if not on then DestroyDrone() end
+    end)
+    StateManager.OnChanged("HitboxAllMod", function(on)
+        if not on then RestoreAllHitboxes() end
+    end)
+    StateManager.OnChanged("AllModIm", function(on)
+        if not on then RestoreAllFreeze() end
+    end)
+
+    -- Aim Magic: không đụng Camera, chỉ tính aimWorldPos khi bấm/chạm
+    Track(UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then return end
+        if not StateManager.Flags.AimMagic then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            local target = CombatEngine.GetTarget()
+            if target then
+                CombatEngine.AttackHook(target, "AimMagic", GetAimPosition(target.Model))
+            end
+        end
+    end))
+
+    Track(RunService.Heartbeat:Connect(function()
+        local flags = StateManager.Flags
+        local _, hum, hrp = GetCharacter()
+
+        CombatEngine.StepModifiers()
+
+        if not (flags.TeleDron or flags.TeleKill or flags.AutoFire) then
+            return
+        end
+        if not hrp or not hum then return end
+
+        local target = CombatEngine.GetTarget()
+
+        if flags.TeleDron then
+            if not droneBP or droneBP.Parent ~= hrp then
+                DestroyDrone()
+                droneBP = Instance.new("BodyPosition")
+                droneBP.MaxForce = Vector3.new(1, 1, 1) * 1e9
+                droneBP.P = 40000
+                droneBP.D = 2500
+                droneBP.Position = hrp.Position
+                droneBP.Parent = hrp
+                droneBG = Instance.new("BodyGyro")
+                droneBG.MaxTorque = Vector3.new(1, 1, 1) * 1e9
+                droneBG.P = 20000
+                droneBG.CFrame = hrp.CFrame
+                droneBG.Parent = hrp
+            end
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            if target then
+                local tpos = target.Root.Position
+                droneBP.Position = tpos + Vector3.new(0, StateManager.Config.DroneHeightOffset, 0)
+                droneBG.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(tpos.X, hrp.Position.Y, tpos.Z))
+                CombatEngine.Fire(target, "TeleDron", GetAimPosition(target.Model))
+            else
+                droneBP.Position = hrp.Position
+            end
+        end
+
+        if flags.TeleKill and target then
+            local tcf = target.Root.CFrame
+            local pos = tcf:PointToWorldSpace(Vector3.new(0, 0, StateManager.Config.KillOffset))
+            hrp.CFrame = CFrame.lookAt(pos, Vector3.new(tcf.Position.X, pos.Y, tcf.Position.Z))
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            CombatEngine.Fire(target, "TeleKill", GetAimPosition(target.Model))
+        end
+
+        if flags.AutoFire and target then
+            CombatEngine.Fire(target, "AutoFire", GetAimPosition(target.Model))
+        end
+    end))
+
+    -- Aimbot: xoay mượt Camera
+    local lastAimModel = nil
+    Track(RunService.RenderStepped:Connect(function()
+        if not StateManager.Flags.Aimbot then
+            lastAimModel = nil
+            return
+        end
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+        local target = CombatEngine.GetTarget()
+        if not target then
+            lastAimModel = nil
+            return
+        end
+        local camPos = cam.CFrame.Position
+        local desired = CFrame.lookAt(camPos, GetAimPosition(target.Model))
+        local alpha = StateManager.Config.AimSmoothness
+        if lastAimModel ~= target.Model then
+            lastAimModel = target.Model
+            alpha = math.min(alpha, 0.12) -- chuyển mục tiêu mượt hơn, chống giật
+        end
+        local dot = math.clamp(cam.CFrame.LookVector:Dot(desired.LookVector), -1, 1)
+        if math.acos(dot) < math.rad(0.3) then return end -- vùng chết chống rung
+        cam.CFrame = cam.CFrame:Lerp(desired, alpha)
+    end))
+end
+
+function CombatEngine.Cleanup()
+    DestroyDrone()
+    RestoreAllHitboxes()
+    RestoreAllFreeze()
+    CombatEngine.Locked = nil
+end
+
+----------------------------------------------------------------------
+-- Drawing layer (dùng Drawing nếu có, nếu không dùng shim bằng GUI)
+----------------------------------------------------------------------
+local DrawingLayer = {}
+local shimGui
+
+local function EnsureShimGui()
+    if shimGui and shimGui.Parent then return shimGui end
+    shimGui = Instance.new("ScreenGui")
+    shimGui.Name = "MCM_EspLayer"
+    shimGui.IgnoreGuiInset = true
+    shimGui.ResetOnSpawn = false
+    shimGui.DisplayOrder = 500
+    shimGui.Parent = GetGuiParent()
+    return shimGui
+end
+
+local function MakeShim(kind)
+    local frame = Instance.new("Frame")
+    frame.BorderSizePixel = 0
+    frame.Visible = false
+    frame.BackgroundTransparency = 1
+    frame.Parent = EnsureShimGui()
+
+    local label, stroke
+    if kind == "Text" then
+        label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.Size = UDim2.fromScale(1, 1)
+        label.Font = Enum.Font.GothamBold
+        label.TextStrokeTransparency = 0
+        label.Parent = frame
+    elseif kind == "Square" then
+        stroke = Instance.new("UIStroke")
+        stroke.Parent = frame
+    elseif kind == "Line" then
+        frame.BackgroundTransparency = 0
+    end
+
+    local data = {
+        Visible = false, Color = Color3.new(1, 1, 1), Thickness = 1,
+        From = Vector2.zero, To = Vector2.zero,
+        Position = Vector2.zero, Size = Vector2.new(0, 0),
+        Text = "", Center = false, Outline = true, Filled = false, Transparency = 1,
+    }
+
+    local function refresh()
+        frame.Visible = data.Visible
+        if not data.Visible then return end
+        if kind == "Line" then
+            local a, b = data.From, data.To
+            local d = b - a
+            frame.BackgroundColor3 = data.Color
+            frame.AnchorPoint = Vector2.new(0.5, 0.5)
+            frame.Size = UDim2.fromOffset(d.Magnitude, math.max(1, data.Thickness))
+            frame.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+            frame.Rotation = math.deg(math.atan2(d.Y, d.X))
+        elseif kind == "Square" then
+            frame.AnchorPoint = Vector2.zero
+            frame.Position = UDim2.fromOffset(data.Position.X, data.Position.Y)
+            frame.Size = UDim2.fromOffset(data.Size.X, data.Size.Y)
+            stroke.Color = data.Color
+            stroke.Thickness = data.Thickness
+        elseif kind == "Text" then
+            local textSize = data.Size and data.Size.X == 0 and 14 or 14
+            frame.AnchorPoint = data.Center and Vector2.new(0.5, 0) or Vector2.zero
+            frame.Size = UDim2.fromOffset(220, 18)
+            frame.Position = UDim2.fromOffset(data.Position.X, data.Position.Y)
+            label.Text = data.Text
+            label.TextColor3 = data.Color
+            label.TextSize = textSize
+        end
+    end
+
+    return setmetatable({}, {
+        __index = function(_, k)
+            if k == "Remove" or k == "Destroy" then
+                return function() frame:Destroy() end
+            end
+            return data[k]
+        end,
+        __newindex = function(_, k, v)
+            if k == "Size" and kind == "Text" then
+                data.Size = type(v) == "number" and Vector2.new(v, v) or v
+            else
+                data[k] = v
+            end
+            refresh()
+        end,
+    })
+end
+
+function DrawingLayer.New(kind)
+    if typeof(Drawing) == "table" and Drawing.new then
+        local ok, obj = pcall(Drawing.new, kind)
+        if ok and obj then return obj end
+    end
+    return MakeShim(kind)
+end
+
+function DrawingLayer.Kill(obj)
+    if obj then
+        pcall(function() obj:Remove() end)
+    end
+end
+
+function DrawingLayer.Shutdown()
+    if shimGui then shimGui:Destroy() shimGui = nil end
+end
+
+----------------------------------------------------------------------
+-- EspEngine
+----------------------------------------------------------------------
+local EspEngine = {}
+EspEngine.Entries = {}        -- [Model] = {Line, Box, Name, Dist, Highlight}
+EspEngine.ItemHighlights = {} -- [Instance] = Highlight
+EspEngine.Container = nil
+
+local ESP_FEATURES = { "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram", "EspWorkspace" }
+local itemAccumulator = 0
+
+local function GetContainer()
+    if EspEngine.Container and EspEngine.Container.Parent then return EspEngine.Container end
+    local folder = Instance.new("Folder")
+    folder.Name = "MCM_Highlights"
+    folder.Parent = Workspace.CurrentCamera or Workspace
+    EspEngine.Container = folder
+    return folder
+end
+
+local function MakeHighlight(adornee, color)
+    local h = Instance.new("Highlight")
+    h.Adornee = adornee
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.FillColor = color
+    h.FillTransparency = 0.6
+    h.OutlineColor = Color3.new(1, 1, 1)
+    h.OutlineTransparency = 0
+    h.Parent = GetContainer()
+    return h
+end
+
+local function DestroyEntry(entry)
+    DrawingLayer.Kill(entry.Line)
+    DrawingLayer.Kill(entry.Box)
+    DrawingLayer.Kill(entry.Name)
+    DrawingLayer.Kill(entry.Dist)
+    if entry.Highlight then entry.Highlight:Destroy() end
+end
+
+local function HideEntry(entry)
+    if entry.Line then entry.Line.Visible = false end
+    if entry.Box then entry.Box.Visible = false end
+    if entry.Name then entry.Name.Visible = false end
+    if entry.Dist then entry.Dist.Visible = false end
+end
+
+local function NewEntry()
+    local line = DrawingLayer.New("Line")
+    line.Color = Color3.fromRGB(255, 80, 80)
+    line.Thickness = 1
+    line.Visible = false
+
+    local box = DrawingLayer.New("Square")
+    box.Color = Color3.fromRGB(255, 255, 0)
+    box.Thickness = 1
+    box.Filled = false
+    box.Visible = false
+
+    local name = DrawingLayer.New("Text")
+    name.Size = 14
+    name.Center = true
+    name.Outline = true
+    name.Color = Color3.new(1, 1, 1)
+    name.Visible = false
+
+    local dist = DrawingLayer.New("Text")
+    dist.Size = 13
+    dist.Center = true
+    dist.Outline = true
+    dist.Color = Color3.fromRGB(150, 255, 150)
+    dist.Visible = false
+
+    return { Line = line, Box = box, Name = name, Dist = dist, Highlight = nil }
+end
+
+function EspEngine.Cleanup()
+    for model, entry in pairs(EspEngine.Entries) do
+        DestroyEntry(entry)
+        EspEngine.Entries[model] = nil
+    end
+    for inst, h in pairs(EspEngine.ItemHighlights) do
+        h:Destroy()
+        EspEngine.ItemHighlights[inst] = nil
+    end
+    if EspEngine.Container then
+        EspEngine.Container:Destroy()
+        EspEngine.Container = nil
+    end
+end
+
+local function ClearItemHighlights()
+    for inst, h in pairs(EspEngine.ItemHighlights) do
+        h:Destroy()
+        EspEngine.ItemHighlights[inst] = nil
+    end
+end
+
+local function UpdateWorkspaceItems(origin)
+    local itemFolder = Workspace:FindFirstChild("Item")
+    if not itemFolder then
+        ClearItemHighlights()
+        return
+    end
+    local range = StateManager.Config.ScanRange
+    local seen = {}
+    for _, child in ipairs(itemFolder:GetChildren()) do
+        if child:IsA("Model") or child:IsA("BasePart") then
+            local ok, pivot = pcall(function() return child:GetPivot().Position end)
+            if ok and (pivot - origin).Magnitude <= range then
+                seen[child] = true
+                if not EspEngine.ItemHighlights[child] then
+                    EspEngine.ItemHighlights[child] = MakeHighlight(child, Color3.fromRGB(80, 200, 255))
+                end
+            end
+        end
+    end
+    for inst, h in pairs(EspEngine.ItemHighlights) do
+        if not seen[inst] or not inst.Parent then
+            h:Destroy()
+            EspEngine.ItemHighlights[inst] = nil
+        end
+    end
+end
+
+function EspEngine.Init()
+    StateManager.OnChanged("EspWorkspace", function(on)
+        if not on then ClearItemHighlights() end
+    end)
+    StateManager.OnChanged("EspHologram", function(on)
+        if not on then
+            for _, entry in pairs(EspEngine.Entries) do
+                if entry.Highlight then
+                    entry.Highlight:Destroy()
+                    entry.Highlight = nil
+                end
+            end
+        end
+    end)
+
+    Track(RunService.RenderStepped:Connect(function(dt)
+        if not StateManager.AnyEnabled(ESP_FEATURES) then
+            if next(EspEngine.Entries) or next(EspEngine.ItemHighlights) or EspEngine.Container then
+                EspEngine.Cleanup()
+            end
+            return
+        end
+
+        local cam = Workspace.CurrentCamera
+        local _, _, hrp = GetCharacter()
+        if not cam or not hrp then return end
+        local flags = StateManager.Flags
+        local viewport = cam.ViewportSize
+        local anyDrawing = flags.EspLine or flags.EspBox or flags.EspName or flags.EspDistance
+
+        -- Workspace.Item (throttle)
+        if flags.EspWorkspace then
+            itemAccumulator += dt
+            if itemAccumulator >= 0.3 then
+                itemAccumulator = 0
+                UpdateWorkspaceItems(hrp.Position)
+            end
+        end
+
+        local active = {}
+        for _, t in ipairs(TargetScanner.GetList()) do
+            local model = t.Model
+            active[model] = true
+            local entry = EspEngine.Entries[model]
+            if not entry then
+                entry = NewEntry()
+                EspEngine.Entries[model] = entry
+            end
+
+            -- Hologram 3D
+            if flags.EspHologram then
+                if not entry.Highlight then
+                    entry.Highlight = MakeHighlight(model, Color3.fromRGB(255, 60, 60))
+                end
+            elseif entry.Highlight then
+                entry.Highlight:Destroy()
+                entry.Highlight = nil
+            end
+
+            -- 2D
+            if anyDrawing then
+                local cf, size = model:GetBoundingBox()
+                local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+                local visible = true
+                for xi = -1, 1, 2 do
+                    for yi = -1, 1, 2 do
+                        for zi = -1, 1, 2 do
+                            local corner = cf:PointToWorldSpace(Vector3.new(xi * size.X / 2, yi * size.Y / 2, zi * size.Z / 2))
+                            local v = cam:WorldToViewportPoint(corner)
+                            if v.Z <= 0 then
+                                visible = false
+                            else
+                                minX = math.min(minX, v.X)
+                                minY = math.min(minY, v.Y)
+                                maxX = math.max(maxX, v.X)
+                                maxY = math.max(maxY, v.Y)
+                            end
+                        end
+                    end
+                end
+
+                if visible and maxX > minX and maxY > minY then
+                    local cx = (minX + maxX) / 2
+                    local cy = (minY + maxY) / 2
+
+                    entry.Line.Visible = flags.EspLine == true
+                    if flags.EspLine then
+                        entry.Line.From = Vector2.new(viewport.X / 2, 0)
+                        entry.Line.To = Vector2.new(cx, cy)
+                    end
+
+                    entry.Box.Visible = flags.EspBox == true
+                    if flags.EspBox then
+                        entry.Box.Position = Vector2.new(minX, minY)
+                        entry.Box.Size = Vector2.new(maxX - minX, maxY - minY)
+                    end
+
+                    entry.Name.Visible = flags.EspName == true
+                    if flags.EspName then
+                        entry.Name.Text = model.Name
+                        entry.Name.Position = Vector2.new(cx, minY - 18)
+                    end
+
+                    entry.Dist.Visible = flags.EspDistance == true
+                    if flags.EspDistance then
+                        entry.Dist.Text = string.format("%.0f studs", t.Distance)
+                        entry.Dist.Position = Vector2.new(cx, maxY + 2)
+                    end
+                else
+                    HideEntry(entry)
+                end
+            else
+                HideEntry(entry)
+            end
+        end
+
+        -- Dọn thực thể rời phạm vi
+        for model, entry in pairs(EspEngine.Entries) do
+            if not active[model] then
+                DestroyEntry(entry)
+                EspEngine.Entries[model] = nil
+            end
+        end
+    end))
+end
+
+----------------------------------------------------------------------
+-- MovementAndWorld
+----------------------------------------------------------------------
+local MovementAndWorld = {}
+MovementAndWorld.VerticalHeld = { Up = false, Down = false }
+
+local noclipOriginal = setmetatable({}, { __mode = "k" })
+local flyBV, flyBG
+local jumpConn
+local lastAirJump = 0
+local LastFlat = Vector3.new(0, 0, -1)
+local lagOriginals = {}
+local lagConn
+
+local function DestroyFly()
+    if flyBV then flyBV:Destroy() flyBV = nil end
+    if flyBG then flyBG:Destroy() flyBG = nil end
+end
+
+local function RestoreNoClip()
+    for part, original in pairs(noclipOriginal) do
+        if part.Parent then
+            part.CanCollide = original
+        end
+        noclipOriginal[part] = nil
+    end
+end
+
+-- Lưu Snapshot CanCollide gốc rồi tắt va chạm các BasePart của nhân vật
+local function ApplyNoClip()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if noclipOriginal[part] == nil then
+                noclipOriginal[part] = part.CanCollide
+            end
+            part.CanCollide = false
+        end
+    end
+end
+
+-- Night Vision --------------------------------------------------------
+local LIGHTING_PROPS = {
+    "Brightness", "ClockTime", "FogEnd", "FogStart", "FogColor",
+    "Ambient", "OutdoorAmbient", "ExposureCompensation", "GlobalShadows",
 }
 
-local function restoreHb(p, o)
-	if p and p.Parent then
-		p.Size = o[1]; p.CanCollide = o[2]; p.Transparency = o[3]; p.Massless = o[4]
-	end
-end
-F.HitboxAll = {
-	Start = function(j)
-		hbOrig = setmetatable({}, { __mode = "k" })
-		local acc = 0
-		local function apply(p, size, inSet)
-			inSet[p] = true
-			if not hbOrig[p] then hbOrig[p] = { p.Size, p.CanCollide, p.Transparency, p.Massless } end
-			p.Size = Vector3.new(size, size, size)
-			p.CanCollide = false; p.Transparency = 0.85; p.Massless = true
-		end
-		j:Add(RunService.Heartbeat:Connect(function(dt)
-			acc += dt
-			if acc < 0.2 then return end
-			acc = 0
-			local size, inSet = State.Config.HitboxSize, {}
-			-- Phóng to root của mọi mục tiêu hợp lệ: phủ cả dưới đất / xuyên tường (sphere cube bao quanh)
-			for _, t in ipairs(Scanner.Get()) do apply(t.Root, size, inSet) end
-			-- Phóng to Handle vũ khí đang cầm
-			local c = LP.Character
-			local tool = c and c:FindFirstChildOfClass("Tool")
-			local handle = tool and tool:FindFirstChild("Handle")
-			if handle and handle:IsA("BasePart") then apply(handle, size, inSet) end
-			-- Khôi phục part không còn trong diện (chết/ra tầm/cất vũ khí)
-			for p, o in pairs(hbOrig) do
-				if not inSet[p] then restoreHb(p, o); hbOrig[p] = nil end
-			end
-		end))
-	end,
-	Stop = function()
-		if hbOrig then for p, o in pairs(hbOrig) do restoreHb(p, o) end end
-		hbOrig = nil
-	end,
-}
+local function ApplyNightVision()
+    local snap = {}
+    snap.Lighting = {}
+    for _, prop in ipairs(LIGHTING_PROPS) do
+        snap.Lighting[prop] = Lighting[prop]
+    end
+    snap.Effects = {}
+    for _, child in ipairs(Lighting:GetChildren()) do
+        if child:IsA("Atmosphere") then
+            snap.Effects[child] = { Density = child.Density, Haze = child.Haze }
+            child.Density = 0
+            child.Haze = 0
+        elseif child:IsA("PostEffect") or child:IsA("SunRaysEffect") or child:IsA("BloomEffect")
+            or child:IsA("BlurEffect") or child:IsA("DepthOfFieldEffect") or child:IsA("ColorCorrectionEffect") then
+            snap.Effects[child] = { Enabled = child.Enabled }
+            child.Enabled = false
+        end
+    end
+    StateManager.Snapshot.NightVision = snap
 
-F.NoClip = {
-	Start = function(j) NoClip.Acquire("User"); j:Add(function() NoClip.Release("User") end) end,
-}
-
-local FD = { origY = 0 }
-F.FlyDown = {
-	Start = function(j)
-		local _, _, r = getChar(); assert(r, "Chưa có nhân vật")
-		FD.origY = r.Position.Y
-		local x, z, y = r.Position.X, r.Position.Z, r.Position.Y - State.Config.FlyDownDepth
-		NoClip.Acquire("FlyDown"); j:Add(function() NoClip.Release("FlyDown") end)
-		local hold = makeHold(j, r)
-		j:Add(RunService.Heartbeat:Connect(function(dt)
-			local _, h, root = getChar()
-			if not root then return end
-			h.PlatformStand = true
-			local sp, d = State.Config.FlySpeed, planar(h)
-			x += d.X * sp * dt; z += d.Z * sp * dt
-			y += Move.Axis() * sp * 0.7 * dt -- chỉ đổi độ sâu khi bấm, không tự trôi
-			-- Nằm ngửa mặt lên; camera không bị đụng tới (giữ nguyên góc gốc)
-			root.CFrame = CFrame.new(x, y, z) * CFrame.Angles(0, camYaw(), 0) * CFrame.Angles(math.rad(90), 0, 0)
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.AssemblyAngularVelocity = Vector3.zero
-			hold()
-		end))
-	end,
-	Stop = function()
-		local _, _, r = getChar()
-		if r then standUp(Vector3.new(r.Position.X, FD.origY + 3, r.Position.Z)) end
-	end,
-}
-
-F.FlyDron = {
-	Start = function(j)
-		local c0, _, r0 = getChar(); assert(r0, "Chưa có nhân vật")
-		local y, lastGround = r0.Position.Y, r0.Position.Y - 3
-		local hold = makeHold(j, r0)
-		local rp = RaycastParams.new(); rp.FilterType = Enum.RaycastFilterType.Exclude
-		j:Add(RunService.Heartbeat:Connect(function(dt)
-			local c, h, r = getChar()
-			if not r then return end
-			h.PlatformStand = true
-			local cfg = State.Config
-			-- Nút tăng/giảm chỉnh độ cao từ từ
-			cfg.FlyDronHeight = math.clamp(cfg.FlyDronHeight + Move.Axis() * 4 * dt, 1, 100)
-			rp.FilterDescendantsInstances = { c }
-			local hit = Workspace:Raycast(r.Position, Vector3.new(0, -500, 0), rp)
-			if hit then lastGround = hit.Position.Y end
-			y += ((lastGround + cfg.FlyDronHeight) - y) * math.min(1, dt * 3) -- bay lên/xuống mượt
-			local d, p = planar(h), r.Position
-			local nx, nz = p.X + d.X * cfg.FlySpeed * dt, p.Z + d.Z * cfg.FlySpeed * dt
-			-- Úp mặt xuống, chỉ di chuyển ngang
-			r.CFrame = CFrame.new(nx, y, nz) * CFrame.Angles(0, camYaw(), 0) * CFrame.Angles(math.rad(-90), 0, 0)
-			r.AssemblyLinearVelocity = Vector3.zero
-			r.AssemblyAngularVelocity = Vector3.zero
-			hold()
-		end))
-	end,
-	Stop = function()
-		local _, _, r = getChar()
-		if r then standUp(r.Position) end
-	end,
-}
-
-F.FlyAir = {
-	Start = function(j)
-		local _, _, r0 = getChar(); assert(r0, "Chưa có nhân vật")
-		local hold = makeHold(j, r0)
-		j:Add(RunService.Heartbeat:Connect(function()
-			local _, h, r = getChar()
-			if not r then return end
-			h.PlatformStand = true
-			local sp = State.Config.FlySpeed
-			-- Không bấm = vận tốc 0 + triệt trọng lực => đứng yên đúng độ cao, không tự rơi
-			r.AssemblyLinearVelocity = planar(h) * sp + Vector3.new(0, Move.Axis() * sp * 0.7, 0)
-			r.AssemblyAngularVelocity = Vector3.zero
-			r.CFrame = CFrame.new(r.Position) * CFrame.Angles(0, camYaw(), 0)
-			hold()
-		end))
-	end,
-	Stop = function()
-		local _, h, r = getChar()
-		if h then h.PlatformStand = false end
-		if r then r.AssemblyLinearVelocity = Vector3.zero end
-	end,
-}
-
-local speedOrig = nil
-F.Speed = {
-	Start = function(j)
-		local _, h = getChar(); assert(h, "Chưa có nhân vật")
-		speedOrig = h.WalkSpeed
-		j:Add(RunService.Heartbeat:Connect(function()
-			local _, hum = getChar()
-			if hum then hum.WalkSpeed = State.Config.WalkSpeed end -- cập nhật thời gian thực
-		end))
-	end,
-	Stop = function()
-		local _, h = getChar()
-		if h and speedOrig then h.WalkSpeed = speedOrig end
-		speedOrig = nil
-	end,
-}
-
-F.JumpAir = {
-	Start = function(j)
-		j:Add(UIS.JumpRequest:Connect(function()
-			local _, h = getChar()
-			if not h then return end
-			-- Gỡ PlatformStand nếu không có chế độ bay nào đang giữ (tránh kẹt không di chuyển)
-			if h.PlatformStand and not (State.Flags.FlyAir or State.Flags.FlyDown
-				or State.Flags.FlyDron or State.Flags.TeleDron) then h.PlatformStand = false end
-			h:ChangeState(Enum.HumanoidStateType.Jumping)
-		end))
-	end,
-}
-
-local NV = nil
-local NV_PROPS = { "Brightness", "ClockTime", "FogStart", "FogEnd", "GlobalShadows", "Ambient",
-	"OutdoorAmbient", "ExposureCompensation" }
-local function nvApply()
-	Lighting.Brightness = 2; Lighting.ClockTime = 14
-	Lighting.FogStart = 1e8; Lighting.FogEnd = 1e9
-	Lighting.GlobalShadows = false
-	Lighting.Ambient = Color3.new(1, 1, 1); Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
-	Lighting.ExposureCompensation = 0
-	for _, a in ipairs(Lighting:GetChildren()) do
-		if a:IsA("Atmosphere") then
-			if NV and not NV.atm[a] then NV.atm[a] = { a.Density, a.Haze } end
-			a.Density = 0; a.Haze = 0
-		end
-	end
-end
-F.NightVision = {
-	Start = function(j)
-		NV = { l = {}, atm = {} }
-		for _, k in ipairs(NV_PROPS) do NV.l[k] = Lighting[k] end -- Snapshot gốc
-		nvApply()
-		local acc = 0
-		j:Add(RunService.Heartbeat:Connect(function(dt)
-			acc += dt
-			if acc > 0.5 then acc = 0; nvApply() end -- chống game ghi đè
-		end))
-	end,
-	Stop = function()
-		if not NV then return end
-		for k, v in pairs(NV.l) do pcall(function() Lighting[k] = v end) end
-		for a, v in pairs(NV.atm) do if a.Parent then a.Density = v[1]; a.Haze = v[2] end end
-		NV = nil
-	end,
-}
-
-local FL = nil
-local function lagOne(i)
-	if i:IsA("ParticleEmitter") or i:IsA("Trail") or i:IsA("Beam") or i:IsA("Smoke")
-		or i:IsA("Fire") or i:IsA("Sparkles") or i:IsA("PostEffect") then
-		if i.Enabled then FL.inst[i] = "Enabled"; i.Enabled = false end
-	elseif i:IsA("BasePart") and i.CastShadow then
-		FL.inst[i] = "CastShadow"; i.CastShadow = false
-	end
-end
-F.FixLag = {
-	Start = function(j)
-		FL = { inst = setmetatable({}, { __mode = "k" }), shadows = Lighting.GlobalShadows }
-		Lighting.GlobalShadows = false
-		local alive = true
-		j:Add(function() alive = false end)
-		task.spawn(function() -- chia lô, yield để không đứng hình
-			local n = 0
-			for _, root in ipairs({ Workspace, Lighting }) do
-				for _, i in ipairs(root:GetDescendants()) do
-					if not alive then return end
-					pcall(lagOne, i)
-					n += 1
-					if n % 400 == 0 then task.wait() end
-				end
-			end
-		end)
-		j:Add(Workspace.DescendantAdded:Connect(function(i) if alive then pcall(lagOne, i) end end))
-	end,
-	Stop = function()
-		if not FL then return end
-		for i, prop in pairs(FL.inst) do if i.Parent then pcall(function() i[prop] = true end) end end
-		Lighting.GlobalShadows = FL.shadows
-		FL = nil
-	end,
-}
-
--- =====================================================================
--- ESP ENGINE (vẽ bằng GUI + Highlight; dọn sạch khi tắt / mục tiêu chết / ra tầm)
--- =====================================================================
-local C = {
-	bg = Color3.fromHex("0C0E0C"), bg2 = Color3.fromHex("141814"),
-	green = Color3.fromHex("00FF66"), off = Color3.fromHex("8A938A"),
-}
-local Esp = { Gui = nil, Entries = {}, refs = 0, conn = nil, WS = {} }
-
-function Esp.Ensure()
-	if Esp.Gui and Esp.Gui.Parent then return end
-	local g = Instance.new("ScreenGui")
-	g.Name = "HpEsp"; g.ResetOnSpawn = false; g.IgnoreGuiInset = true; g.DisplayOrder = 50
-	g.Parent = PlayerGui
-	Esp.Gui = g
+    Lighting.Brightness = 3
+    Lighting.ClockTime = 14
+    Lighting.FogEnd = 1e6
+    Lighting.FogStart = 1e6
+    Lighting.Ambient = Color3.new(1, 1, 1)
+    Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+    Lighting.ExposureCompensation = 0.5
+    Lighting.GlobalShadows = false
 end
 
-local function comp(e, k, on, make)
-	if on then
-		if not e[k] then e[k] = make() end
-		return e[k]
-	end
-	if e[k] then e[k]:Destroy(); e[k] = nil end
-end
-local function clearEntry(e)
-	for _, k in ipairs({ "line", "box", "label", "hl" }) do
-		if e[k] then e[k]:Destroy(); e[k] = nil end
-	end
-end
-function Esp.ClearAll()
-	for _, e in pairs(Esp.Entries) do clearEntry(e) end
-	table.clear(Esp.Entries)
-end
-
-local function mkLine()
-	local f = Instance.new("Frame")
-	f.BorderSizePixel = 0; f.AnchorPoint = Vector2.new(0.5, 0.5)
-	f.BackgroundColor3 = C.green; f.Parent = Esp.Gui
-	return f
-end
-local function mkBox()
-	local f = Instance.new("Frame")
-	f.BackgroundTransparency = 1; f.BorderSizePixel = 0; f.AnchorPoint = Vector2.new(0.5, 0.5)
-	local s = Instance.new("UIStroke"); s.Color = C.green; s.Thickness = 1.5; s.Parent = f
-	f.Parent = Esp.Gui
-	return f
-end
-local function mkLabel()
-	local l = Instance.new("TextLabel")
-	l.BackgroundTransparency = 1; l.Size = UDim2.fromOffset(160, 30)
-	l.AnchorPoint = Vector2.new(0.5, 1); l.TextColor3 = C.green
-	l.TextStrokeTransparency = 0; l.Font = Enum.Font.GothamBold; l.TextSize = 12
-	l.Parent = Esp.Gui
-	return l
-end
-local function setLine(f, a, b)
-	local d = b - a
-	f.Size = UDim2.fromOffset(d.Magnitude, 1.5)
-	f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
-	f.Rotation = math.deg(math.atan2(d.Y, d.X))
+local function RestoreNightVision()
+    local snap = StateManager.Snapshot.NightVision
+    if not snap then return end
+    for prop, value in pairs(snap.Lighting) do
+        pcall(function() Lighting[prop] = value end)
+    end
+    for inst, props in pairs(snap.Effects) do
+        if inst.Parent then
+            for prop, value in pairs(props) do
+                pcall(function() inst[prop] = value end)
+            end
+        end
+    end
+    StateManager.Snapshot.NightVision = nil
 end
 
-local function absV(v) return Vector3.new(math.abs(v.X), math.abs(v.Y), math.abs(v.Z)) end
--- AABB theo hệ tọa độ root, bỏ qua part đã bị Hitbox phóng to (để Box luôn khớp kích thước thật)
-local function localBounds(model, root)
-	local mn = Vector3.new(math.huge, math.huge, math.huge)
-	local mx = -mn
-	local inv = root.CFrame:Inverse()
-	for _, p in ipairs(model:GetDescendants()) do
-		if p:IsA("BasePart") and not (hbOrig and hbOrig[p]) then
-			local cf, s = inv * p.CFrame, p.Size / 2
-			local ext = absV(cf.RightVector) * s.X + absV(cf.UpVector) * s.Y + absV(cf.LookVector) * s.Z
-			mn = mn:Min(cf.Position - ext); mx = mx:Max(cf.Position + ext)
-		end
-	end
-	if mn.X == math.huge then mn = Vector3.new(-2, -3, -1); mx = Vector3.new(2, 3, 1) end
-	return mn, mx
+-- Fix Lag -------------------------------------------------------------
+local function LagOptimize(inst)
+    if lagOriginals[inst] then return end
+    if inst:IsA("BasePart") then
+        lagOriginals[inst] = { CastShadow = inst.CastShadow }
+        inst.CastShadow = false
+    elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam")
+        or inst:IsA("Fire") or inst:IsA("Smoke") then
+        lagOriginals[inst] = { Enabled = inst.Enabled }
+        inst.Enabled = false
+    elseif inst:IsA("Decal") or inst:IsA("Texture") then
+        lagOriginals[inst] = { Transparency = inst.Transparency }
+        inst.Transparency = 0.9
+    elseif inst:IsA("PostEffect") then
+        -- Bỏ qua hiệu ứng đã do Night Vision quản lý để tránh xung đột Snapshot
+        local nv = StateManager.Snapshot.NightVision
+        if nv and nv.Effects[inst] then return end
+        lagOriginals[inst] = { Enabled = inst.Enabled }
+        inst.Enabled = false
+    end
 end
 
-function Esp.Update()
-	local Fl = State.Flags
-	Esp.Ensure()
-	local cam = Workspace.CurrentCamera
-	local vp = cam.ViewportSize
-	local _, _, myRoot = getChar()
-	local seen = {}
-	if myRoot then
-		for _, t in ipairs(Scanner.Get()) do
-			local model, root = t.Model, t.Root
-			-- Kiểm tra lại mỗi khung hình: mục tiêu chết/ra tầm bị xoá chỉ báo ngay
-			if Scanner.Valid(model, myRoot.Position) then
-				seen[model] = true
-				local e = Esp.Entries[model]
-				if not e then e = {}; Esp.Entries[model] = e end
-				local sp = cam:WorldToViewportPoint(root.Position)
-
-				local ln = comp(e, "line", Fl.EspLine, mkLine)
-				if ln then
-					ln.Visible = sp.Z > 0
-					if sp.Z > 0 then setLine(ln, Vector2.new(vp.X / 2, 0), Vector2.new(sp.X, sp.Y)) end
-				end
-
-				comp(e, "hl", Fl.EspHologram, function()
-					local h = Instance.new("Highlight")
-					h.Adornee = model; h.FillColor = Color3.fromRGB(255, 60, 60)
-					h.FillTransparency = 0.6; h.OutlineColor = C.green
-					h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-					h.Parent = Esp.Gui
-					return h
-				end)
-
-				local box = comp(e, "box", Fl.EspBox, mkBox)
-				local lbl = comp(e, "label", Fl.EspName or Fl.EspDistance, mkLabel)
-				if box or lbl then
-					if not e.bounds or os.clock() - e.bt > 0.5 then -- cache bounds 0.5s
-						e.bounds = { localBounds(model, root) }; e.bt = os.clock()
-					end
-					local mn, mx = e.bounds[1], e.bounds[2]
-					local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
-					local ok = true
-					for _, ix in ipairs({ mn.X, mx.X }) do
-						for _, iy in ipairs({ mn.Y, mx.Y }) do
-							for _, iz in ipairs({ mn.Z, mx.Z }) do
-								local v = cam:WorldToViewportPoint(root.CFrame:PointToWorldSpace(Vector3.new(ix, iy, iz)))
-								if v.Z <= 0 then ok = false end
-								minX = math.min(minX, v.X); maxX = math.max(maxX, v.X)
-								minY = math.min(minY, v.Y); maxY = math.max(maxY, v.Y)
-							end
-						end
-					end
-					if box then
-						box.Visible = ok
-						if ok then
-							box.Position = UDim2.fromOffset((minX + maxX) / 2, (minY + maxY) / 2)
-							box.Size = UDim2.fromOffset(maxX - minX, maxY - minY)
-						end
-					end
-					if lbl then
-						lbl.Visible = ok
-						if ok then
-							local lines = {}
-							if Fl.EspName then table.insert(lines, model.Name) end
-							if Fl.EspDistance then
-								local d = (root.Position - myRoot.Position).Magnitude
-								table.insert(lines, string.format("%d studs | %.0f m", d, d * 0.28))
-							end
-							lbl.Text = table.concat(lines, "\n")
-							lbl.Position = UDim2.fromOffset((minX + maxX) / 2, minY - 2)
-						end
-					end
-				end
-			end
-		end
-	end
-	for m, e in pairs(Esp.Entries) do -- dọn mục tiêu không còn hợp lệ
-		if not seen[m] then clearEntry(e); Esp.Entries[m] = nil end
-	end
+local function ApplyFixLag()
+    StateManager.Snapshot.GlobalShadows = Lighting.GlobalShadows
+    Lighting.GlobalShadows = false
+    for _, inst in ipairs(Lighting:GetChildren()) do
+        LagOptimize(inst) -- hậu kỳ (Bloom/Blur/SunRays/DoF/ColorCorrection)
+    end
+    task.spawn(function()
+        local count = 0
+        for _, inst in ipairs(Workspace:GetDescendants()) do
+            if not StateManager.Flags.FixLag then return end
+            LagOptimize(inst)
+            count += 1
+            if count % 400 == 0 then task.wait() end
+        end
+    end)
+    lagConn = Workspace.DescendantAdded:Connect(function(inst)
+        if StateManager.Flags.FixLag then
+            LagOptimize(inst)
+        end
+    end)
 end
 
-function Esp.Retain()
-	Esp.refs += 1
-	if Esp.conn then return end
-	Esp.conn = RunService.RenderStepped:Connect(function()
-		local ok, err = pcall(Esp.Update)
-		if not ok then warn("[Esp] " .. tostring(err)) end
-	end)
-end
-function Esp.Release()
-	Esp.refs = math.max(0, Esp.refs - 1)
-	if Esp.refs == 0 then
-		if Esp.conn then Esp.conn:Disconnect(); Esp.conn = nil end
-		Esp.ClearAll()
-	end
-end
-for _, n in ipairs({ "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram" }) do
-	F[n] = { Start = function() Esp.Retain() end, Stop = function() Esp.Release() end }
-end
-
--- Esp Workspace: quét an toàn workspace.Item, Highlight tối đa 30 vật gần nhất (giới hạn render của Roblox ~31)
-local function wsClear() for _, h in pairs(Esp.WS) do h:Destroy() end table.clear(Esp.WS) end
-F.EspWorkspace = {
-	Start = function(j)
-		local acc = 1
-		j:Add(RunService.Heartbeat:Connect(function(dt)
-			acc += dt
-			if acc < 0.5 then return end
-			acc = 0
-			local _, _, r = getChar()
-			local item = Workspace:FindFirstChild("Item") -- kiểm tra tồn tại trước khi truy cập
-			local keep, cand = {}, {}
-			if r and item then
-				for _, o in ipairs(item:GetChildren()) do
-					if o:IsA("Model") or o:IsA("BasePart") then
-						local hum = o:FindFirstChildOfClass("Humanoid")
-						if not (hum and hum.Health <= 0) then
-							local d = (o:GetPivot().Position - r.Position).Magnitude
-							if d <= State.Config.ScanRange then table.insert(cand, { o, d }) end
-						end
-					end
-				end
-				table.sort(cand, function(a, b) return a[2] < b[2] end)
-			end
-			Esp.Ensure()
-			for i = 1, math.min(30, #cand) do
-				local o = cand[i][1]
-				keep[o] = true
-				if not Esp.WS[o] then
-					local h = Instance.new("Highlight")
-					h.Adornee = o; h.FillColor = Color3.fromRGB(255, 220, 60); h.FillTransparency = 0.5
-					h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; h.Parent = Esp.Gui
-					Esp.WS[o] = h
-				end
-			end
-			for o, h in pairs(Esp.WS) do
-				if not keep[o] then h:Destroy(); Esp.WS[o] = nil end
-			end
-		end))
-	end,
-	Stop = wsClear,
-}
-
--- =====================================================================
--- UI CONTROLLER: menu 350x200, kéo thả, thu nhỏ, 3 tab, cuộn danh sách chức năng
--- =====================================================================
-local UI = { rows = {}, conns = Janitor.new() }
-
-local TABS = {
-	{ id = "Main", items = {
-		{ "toggle", "TeleDron", "Tele Dron" }, { "toggle", "HitboxAll", "Hitbox All Mod" },
-		{ "toggle", "TeleKill", "Tele Kill" }, { "toggle", "Aimbot", "Aimbot" },
-		{ "num", "SafeHeight", "Cao Tele Dron", 3, 60 }, { "num", "HitboxSize", "Cỡ Hitbox", 2, 60 },
-		{ "num", "ScanRange", "Phạm vi quét", 20, 500 },
-	} },
-	{ id = "Esp", items = {
-		{ "toggle", "EspLine", "Esp Line" }, { "toggle", "EspBox", "Esp Box" },
-		{ "toggle", "EspName", "Esp Name" }, { "toggle", "EspDistance", "Esp Distance" },
-		{ "toggle", "EspHologram", "Esp Hologram" }, { "toggle", "EspWorkspace", "Esp Workspace" },
-	} },
-	{ id = "Khác", items = {
-		{ "toggle", "FlyDown", "Fly Down" }, { "toggle", "FlyDron", "Fly Dron" },
-		{ "num", "FlyDronHeight", "Độ cao Fly Dron", 1, 100 },
-		{ "toggle", "NoClip", "No Clip" }, { "toggle", "FlyAir", "Fly Air" },
-		{ "num", "FlySpeed", "Fly Speed", 5, 300 },
-		{ "toggle", "Speed", "Speed" }, { "num", "WalkSpeed", "Giá trị Speed", 1, 200 },
-		{ "toggle", "JumpAir", "Jumping Air" }, { "toggle", "NightVision", "Night Vision" },
-		{ "toggle", "FixLag", "Fix Lag" },
-	} },
-}
-
-local function stroke(o, th) local s = Instance.new("UIStroke"); s.Color = C.green; s.Thickness = th or 1; s.Parent = o return s end
-local function mkBtn(parent, text, size, pos)
-	local b = Instance.new("TextButton")
-	b.Size = size; b.Position = pos or UDim2.new(); b.BackgroundColor3 = C.bg2
-	b.BorderSizePixel = 0; b.Text = text; b.TextColor3 = C.green
-	b.Font = Enum.Font.GothamBold; b.TextSize = 12; b.AutoButtonColor = true; b.Parent = parent
-	return b
+local function RestoreFixLag()
+    if lagConn then lagConn:Disconnect() lagConn = nil end
+    if StateManager.Snapshot.GlobalShadows ~= nil then
+        Lighting.GlobalShadows = StateManager.Snapshot.GlobalShadows
+        StateManager.Snapshot.GlobalShadows = nil
+    end
+    task.spawn(function()
+        local count = 0
+        for inst, props in pairs(lagOriginals) do
+            if inst.Parent then
+                for prop, value in pairs(props) do
+                    pcall(function() inst[prop] = value end)
+                end
+            end
+            lagOriginals[inst] = nil
+            count += 1
+            if count % 400 == 0 then task.wait() end
+        end
+    end)
 end
 
-function UI.Build()
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "HpTeamProV1"; gui.ResetOnSpawn = false; gui.DisplayOrder = 100; gui.Parent = PlayerGui
-	UI.Gui = gui
-
-	local main = Instance.new("Frame")
-	main.Size = UDim2.fromOffset(350, 200); main.Position = UDim2.new(0.5, -175, 0.5, -100)
-	main.BackgroundColor3 = C.bg; main.BorderSizePixel = 0; main.ClipsDescendants = true
-	main.Active = true; main.Parent = gui
-	stroke(main, 1.5)
-
-	local title = Instance.new("Frame")
-	title.Size = UDim2.new(1, 0, 0, 24); title.BackgroundColor3 = C.bg2
-	title.BorderSizePixel = 0; title.Parent = main
-	local tl = Instance.new("TextLabel")
-	tl.Size = UDim2.new(1, -60, 1, 0); tl.Position = UDim2.fromOffset(8, 0)
-	tl.BackgroundTransparency = 1; tl.Text = "Hp Team Pro V1"; tl.TextColor3 = C.green
-	tl.Font = Enum.Font.GothamBold; tl.TextSize = 13; tl.TextXAlignment = Enum.TextXAlignment.Left
-	tl.Parent = title
-	local minB = mkBtn(title, "–", UDim2.fromOffset(24, 24), UDim2.new(1, -52, 0, 0))
-	local closeB = mkBtn(title, "X", UDim2.fromOffset(24, 24), UDim2.new(1, -26, 0, 0))
-
-	local tabBar = Instance.new("Frame")
-	tabBar.Size = UDim2.new(1, 0, 0, 22); tabBar.Position = UDim2.fromOffset(0, 24)
-	tabBar.BackgroundColor3 = C.bg; tabBar.BorderSizePixel = 0; tabBar.Parent = main
-	local tl2 = Instance.new("UIListLayout"); tl2.FillDirection = Enum.FillDirection.Horizontal
-	tl2.Padding = UDim.new(0, 2); tl2.Parent = tabBar
-
-	local body = Instance.new("ScrollingFrame")
-	body.Size = UDim2.new(1, 0, 1, -46); body.Position = UDim2.fromOffset(0, 46)
-	body.BackgroundTransparency = 1; body.BorderSizePixel = 0; body.ScrollBarThickness = 3
-	body.ScrollBarImageColor3 = C.green; body.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	body.CanvasSize = UDim2.new(); body.Parent = main
-	local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 3); lay.Parent = body
-	local pad = Instance.new("UIPadding")
-	pad.PaddingLeft = UDim.new(0, 4); pad.PaddingRight = UDim.new(0, 6); pad.PaddingTop = UDim.new(0, 3)
-	pad.Parent = body
-
-	local tabBtns = {}
-	local function show(idx)
-		for _, ch in ipairs(body:GetChildren()) do
-			if ch:IsA("GuiObject") then ch:Destroy() end
-		end
-		table.clear(UI.rows)
-		for i, b in ipairs(tabBtns) do b.TextColor3 = (i == idx) and C.green or C.off end
-		for order, it in ipairs(TABS[idx].items) do
-			local kind, key, text = it[1], it[2], it[3]
-			if kind == "toggle" then
-				local b = mkBtn(body, "", UDim2.new(1, 0, 0, 26))
-				b.LayoutOrder = order; b.TextXAlignment = Enum.TextXAlignment.Left
-				local pd = Instance.new("UIPadding"); pd.PaddingLeft = UDim.new(0, 8); pd.Parent = b
-				local function refresh()
-					local on = State.Flags[key]
-					b.Text = text .. "   [" .. (on and "ON" or "OFF") .. "]"
-					b.TextColor3 = on and C.green or C.off
-					b.BackgroundColor3 = on and Color3.fromHex("1B2A1F") or C.bg2
-				end
-				b.MouseButton1Click:Connect(function() State.Set(key, not State.Flags[key]) end)
-				UI.rows[key] = refresh; refresh()
-			else
-				local row = Instance.new("Frame")
-				row.Size = UDim2.new(1, 0, 0, 26); row.BackgroundColor3 = C.bg2
-				row.BorderSizePixel = 0; row.LayoutOrder = order; row.Parent = body
-				local l = Instance.new("TextLabel")
-				l.Size = UDim2.new(1, -90, 1, 0); l.Position = UDim2.fromOffset(8, 0)
-				l.BackgroundTransparency = 1; l.Text = text; l.TextColor3 = C.off
-				l.Font = Enum.Font.Gotham; l.TextSize = 12; l.TextXAlignment = Enum.TextXAlignment.Left
-				l.Parent = row
-				local tb = Instance.new("TextBox")
-				tb.Size = UDim2.fromOffset(76, 20); tb.Position = UDim2.new(1, -80, 0, 3)
-				tb.BackgroundColor3 = C.bg; tb.BorderSizePixel = 0; tb.TextColor3 = C.green
-				tb.Font = Enum.Font.GothamBold; tb.TextSize = 12; tb.ClearTextOnFocus = false
-				tb.Text = string.format("%.0f", State.Config[key]); tb.Parent = row
-				stroke(tb, 1)
-				tb.FocusLost:Connect(function()
-					local n = tonumber(tb.Text) -- chỉ nhận số hợp lệ, kẹp trong [min,max]
-					if n then State.Config[key] = math.clamp(n, it[4], it[5]) end
-					tb.Text = string.format("%.0f", State.Config[key])
-				end)
-				UI.rows[key] = function() if not tb:IsFocused() then tb.Text = string.format("%.0f", State.Config[key]) end end
-			end
-		end
-		body.CanvasPosition = Vector2.zero
-	end
-	for i, t in ipairs(TABS) do
-		local b = mkBtn(tabBar, t.id, UDim2.new(1 / #TABS, -2, 1, 0))
-		b.LayoutOrder = i; b.BackgroundColor3 = C.bg
-		b.MouseButton1Click:Connect(function() show(i) end)
-		tabBtns[i] = b
-	end
-	show(1)
-
-	-- Thu gọn / mở rộng
-	local collapsed = false
-	minB.MouseButton1Click:Connect(function()
-		collapsed = not collapsed
-		tabBar.Visible = not collapsed; body.Visible = not collapsed
-		main.Size = collapsed and UDim2.fromOffset(350, 24) or UDim2.fromOffset(350, 200)
-		minB.Text = collapsed and "+" or "–"
-	end)
-	closeB.MouseButton1Click:Connect(function() UI.Shutdown() end)
-
-	-- Kéo thả bằng thanh tiêu đề (chuột + cảm ứng)
-	local dragging, dragStart, startPos = false, nil, nil
-	title.InputBegan:Connect(function(i)
-		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-			dragging = true; dragStart = i.Position; startPos = main.Position
-			i.Changed:Connect(function()
-				if i.UserInputState == Enum.UserInputState.End then dragging = false end
-			end)
-		end
-	end)
-	UI.conns:Add(UIS.InputChanged:Connect(function(i)
-		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement
-			or i.UserInputType == Enum.UserInputType.Touch) then
-			local d = i.Position - dragStart
-			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
-				startPos.Y.Scale, startPos.Y.Offset + d.Y)
-		end
-	end))
-
-	-- Cụm nút ▲▼ (hiện khi có chế độ bay)
-	local pad2 = Instance.new("Frame")
-	pad2.Size = UDim2.fromOffset(56, 116); pad2.Position = UDim2.new(1, -72, 0.5, -58)
-	pad2.BackgroundTransparency = 1; pad2.Visible = false; pad2.Parent = gui
-	local function holdBtn(text, y, field)
-		local b = mkBtn(pad2, text, UDim2.fromOffset(56, 54), UDim2.fromOffset(0, y))
-		b.TextSize = 22; stroke(b, 1.5)
-		b.InputBegan:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-				Move[field] = true
-				i.Changed:Connect(function()
-					if i.UserInputState == Enum.UserInputState.End then Move[field] = false end
-				end)
-			end
-		end)
-	end
-	holdBtn("▲", 0, "Up"); holdBtn("▼", 62, "Down")
-	UI.Pad = pad2
-
-	State.OnChange(function(name)
-		if UI.rows[name] then UI.rows[name]() end
-		pad2.Visible = (State.Flags.FlyAir or State.Flags.FlyDown or State.Flags.FlyDron) and true or false
-		if not pad2.Visible then Move.Up = false; Move.Down = false end
-	end)
-	-- Đồng bộ ô số theo thời gian thực (Fly Dron chỉnh độ cao bằng nút)
-	local acc = 0
-	UI.conns:Add(RunService.Heartbeat:Connect(function(dt)
-		acc += dt
-		if acc > 0.25 then acc = 0; if UI.rows.FlyDronHeight then UI.rows.FlyDronHeight() end end
-	end))
+local function AnyFlight()
+    local f = StateManager.Flags
+    return f.FlyAir == true or f.FlyDown == true or f.FlyDron == true
 end
 
--- Phím tắt E (lên) / Q (xuống) khi đang bay
-UI.conns:Add(UIS.InputBegan:Connect(function(i, gp)
-	if gp then return end
-	if i.KeyCode == Enum.KeyCode.E then Move.Up = true elseif i.KeyCode == Enum.KeyCode.Q then Move.Down = true end
+local flightRayParams = RaycastParams.new()
+flightRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+-- Tư thế nằm: đầu hướng về phía trước; faceUp=true: ngửa mặt lên, false: úp mặt xuống
+local function PoseCFrame(forward, faceUp)
+    local back = faceUp and Vector3.new(0, -1, 0) or Vector3.new(0, 1, 0)
+    local right = forward:Cross(back)
+    return CFrame.fromMatrix(Vector3.zero, right, forward, back)
+end
+
+-- Bước điều khiển bay chung cho FlyAir / FlyDown / FlyDron
+function MovementAndWorld.StepFlight(dt, hum, hrp)
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local flags = StateManager.Flags
+    local cfg = StateManager.Config
+
+    if not flyBV or flyBV.Parent ~= hrp then
+        DestroyFly()
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1, 1, 1) * 1e9
+        flyBV.Velocity = Vector3.zero
+        flyBV.Parent = hrp
+        flyBG = Instance.new("BodyGyro")
+        flyBG.MaxTorque = Vector3.new(1, 1, 1) * 1e9
+        flyBG.P = 15000
+        flyBG.CFrame = hrp.CFrame
+        flyBG.Parent = hrp
+    end
+
+    if StateManager.Snapshot.PlatformStand == nil then
+        StateManager.Snapshot.PlatformStand = hum.PlatformStand
+    end
+    hum.PlatformStand = true
+
+    local speed = cfg.FlySpeed
+    local moveDir = hum.MoveDirection
+    local look = cam.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude > 0.01 then LastFlat = flatLook.Unit end
+
+    local held = MovementAndWorld.VerticalHeld
+    local vInput = (held.Up and 1 or 0) - (held.Down and 1 or 0)
+    local velocity = Vector3.zero
+    local gyro
+
+    if flags.FlyAir then
+        -- Đứng yên = vận tốc 0 => không rơi, giữ nguyên độ cao
+        if moveDir.Magnitude > 0.05 then
+            velocity = moveDir * speed
+            if flatLook.Magnitude > 0.01 then
+                local dot = moveDir:Dot(flatLook.Unit)
+                velocity += Vector3.new(0, look.Y * dot * speed, 0)
+            end
+        end
+        velocity += Vector3.new(0, vInput * speed, 0)
+        gyro = CFrame.lookAt(Vector3.zero, LastFlat)
+    elseif flags.FlyDown then
+        -- Nằm ngửa, không tự tăng/giảm khi không bấm; camera không bị can thiệp
+        velocity = moveDir * speed + Vector3.new(0, vInput * speed, 0)
+        gyro = PoseCFrame(LastFlat, true)
+    else
+        -- Fly Dron: giữ độ cao cố định so với mặt đất, úp mặt xuống
+        cfg.FlyDronHeight = math.clamp(cfg.FlyDronHeight + vInput * cfg.FlyAdjustRate * dt, 1, 300)
+        local char = LocalPlayer.Character
+        flightRayParams.FilterDescendantsInstances = char and { char } or {}
+        local hit = Workspace:Raycast(hrp.Position, Vector3.new(0, -1000, 0), flightRayParams)
+        local vy = 0
+        if hit then
+            local targetY = hit.Position.Y + cfg.FlyDronHeight
+            vy = math.clamp((targetY - hrp.Position.Y) * 6, -speed, speed) -- lên/xuống từ từ
+        end
+        velocity = moveDir * speed + Vector3.new(0, vy, 0)
+        gyro = PoseCFrame(LastFlat, false)
+    end
+
+    flyBV.Velocity = velocity
+    flyBG.CFrame = gyro
+end
+
+function MovementAndWorld.Init()
+    StateManager.OnChanged("NoClip", function(on)
+        if not on and not StateManager.Flags.FlyDown then RestoreNoClip() end
+    end)
+
+    local function OnFlightChanged(on)
+        if on or AnyFlight() then return end
+        DestroyFly()
+        local _, hum = GetCharacter()
+        if hum and StateManager.Snapshot.PlatformStand ~= nil then
+            hum.PlatformStand = StateManager.Snapshot.PlatformStand
+        end
+        StateManager.Snapshot.PlatformStand = nil
+        MovementAndWorld.VerticalHeld.Up = false
+        MovementAndWorld.VerticalHeld.Down = false
+        if not StateManager.Flags.NoClip then RestoreNoClip() end
+    end
+
+    StateManager.OnChanged("FlyAir", OnFlightChanged)
+    StateManager.OnChanged("FlyDron", OnFlightChanged)
+    StateManager.OnChanged("FlyDown", function(on)
+        if on then
+            -- Tắt va chạm rồi hạ nhân vật xuống dưới mặt đất một lần
+            ApplyNoClip()
+            local _, _, hrp = GetCharacter()
+            if hrp then
+                hrp.CFrame = hrp.CFrame + Vector3.new(0, -StateManager.Config.FlyDownDepth, 0)
+            end
+        end
+        OnFlightChanged(on)
+    end)
+
+    StateManager.OnChanged("Speed", function(on)
+        if on then
+            local _, hum = GetCharacter()
+            if hum and StateManager.Snapshot.WalkSpeed == nil then
+                StateManager.Snapshot.WalkSpeed = hum.WalkSpeed
+            end
+        else
+            local _, hum = GetCharacter()
+            if hum and StateManager.Snapshot.WalkSpeed ~= nil then
+                hum.WalkSpeed = StateManager.Snapshot.WalkSpeed
+            end
+            StateManager.Snapshot.WalkSpeed = nil
+        end
+    end)
+
+    StateManager.OnChanged("NightVision", function(on)
+        if on then ApplyNightVision() else RestoreNightVision() end
+    end)
+
+    StateManager.OnChanged("FixLag", function(on)
+        if on then ApplyFixLag() else RestoreFixLag() end
+    end)
+
+    jumpConn = Track(UserInputService.JumpRequest:Connect(function()
+        if not StateManager.Flags.JumpingAir or AnyFlight() then return end
+        local now = os.clock()
+        if now - lastAirJump < 0.15 then return end -- debounce chống kẹt trạng thái
+        lastAirJump = now
+        local _, hum = GetCharacter()
+        if hum and hum.Health > 0 then
+            hum.PlatformStand = false
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end))
+
+    Track(RunService.Stepped:Connect(function()
+        if StateManager.Flags.NoClip or StateManager.Flags.FlyDown then
+            ApplyNoClip()
+        end
+    end))
+
+    Track(RunService.Heartbeat:Connect(function(dt)
+        local flags = StateManager.Flags
+        local _, hum, hrp = GetCharacter()
+        if not hum or not hrp then return end
+
+        if flags.Speed then
+            if StateManager.Snapshot.WalkSpeed == nil then
+                StateManager.Snapshot.WalkSpeed = hum.WalkSpeed
+            end
+            hum.WalkSpeed = StateManager.Config.WalkSpeed
+        end
+
+        if flags.FlyAir or flags.FlyDown or flags.FlyDron then
+            MovementAndWorld.StepFlight(dt, hum, hrp)
+        end
+    end))
+end
+
+function MovementAndWorld.Cleanup()
+    DestroyFly()
+    RestoreNoClip()
+    RestoreNightVision()
+    RestoreFixLag()
+    local _, hum = GetCharacter()
+    if hum then
+        if StateManager.Snapshot.PlatformStand ~= nil then
+            hum.PlatformStand = StateManager.Snapshot.PlatformStand
+        end
+        if StateManager.Snapshot.WalkSpeed ~= nil then
+            hum.WalkSpeed = StateManager.Snapshot.WalkSpeed
+        end
+    end
+    StateManager.Snapshot.PlatformStand = nil
+    StateManager.Snapshot.WalkSpeed = nil
+end
+
+----------------------------------------------------------------------
+-- UIController
+----------------------------------------------------------------------
+local UIController = {}
+UIController.Gui = nil
+
+local COLOR_BG = Color3.fromRGB(24, 26, 33)
+local COLOR_PANEL = Color3.fromRGB(34, 37, 47)
+local COLOR_ACCENT = Color3.fromRGB(70, 130, 255)
+local COLOR_ON = Color3.fromRGB(60, 190, 100)
+local COLOR_OFF = Color3.fromRGB(190, 70, 70)
+local COLOR_TEXT = Color3.fromRGB(235, 235, 240)
+
+local function Corner(inst, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 6)
+    c.Parent = inst
+    return c
+end
+
+local function MakeLabel(parent, text, size, position, alignment)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Size = size
+    l.Position = position or UDim2.new()
+    l.Font = Enum.Font.GothamMedium
+    l.TextSize = 14
+    l.TextColor3 = COLOR_TEXT
+    l.TextXAlignment = alignment or Enum.TextXAlignment.Left
+    l.Text = text
+    l.Parent = parent
+    return l
+end
+
+function UIController.Build()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ModularControlMenu"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 1000
+    gui.Parent = GetGuiParent()
+    UIController.Gui = gui
+
+    local FULL_SIZE = UDim2.fromOffset(310, 400)
+    local COLLAPSED_SIZE = UDim2.fromOffset(310, 36)
+
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.Size = FULL_SIZE
+    main.Position = UDim2.new(0.5, -155, 0.2, 0)
+    main.BackgroundColor3 = COLOR_BG
+    main.BorderSizePixel = 0
+    main.ClipsDescendants = true
+    main.Parent = gui
+    Corner(main, 10)
+
+    -- Title bar
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 36)
+    titleBar.BackgroundColor3 = COLOR_ACCENT
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = main
+
+    MakeLabel(titleBar, "  QA Control Menu", UDim2.new(1, -80, 1, 0))
+
+    local function TitleButton(text, xOffset)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(30, 26)
+        b.Position = UDim2.new(1, xOffset, 0, 5)
+        b.BackgroundColor3 = COLOR_BG
+        b.TextColor3 = COLOR_TEXT
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 16
+        b.Text = text
+        b.AutoButtonColor = true
+        b.Parent = titleBar
+        Corner(b, 6)
+        return b
+    end
+
+    local collapseBtn = TitleButton("–", -68)
+    local closeBtn = TitleButton("✕", -34)
+
+    -- Drag
+    local dragging, dragStart, startPos = false, nil, nil
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    Track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end))
+
+    -- Body
+    local body = Instance.new("Frame")
+    body.Name = "Body"
+    body.BackgroundTransparency = 1
+    body.Position = UDim2.new(0, 0, 0, 36)
+    body.Size = UDim2.new(1, 0, 1, -36)
+    body.Parent = main
+
+    local tabBar = Instance.new("Frame")
+    tabBar.BackgroundTransparency = 1
+    tabBar.Size = UDim2.new(1, -12, 0, 32)
+    tabBar.Position = UDim2.fromOffset(6, 6)
+    tabBar.Parent = body
+    local tabLayout = Instance.new("UIListLayout")
+    tabLayout.FillDirection = Enum.FillDirection.Horizontal
+    tabLayout.Padding = UDim.new(0, 6)
+    tabLayout.Parent = tabBar
+
+    local pagesHolder = Instance.new("Frame")
+    pagesHolder.BackgroundTransparency = 1
+    pagesHolder.Position = UDim2.fromOffset(6, 44)
+    pagesHolder.Size = UDim2.new(1, -12, 1, -50)
+    pagesHolder.Parent = body
+
+    local pages, tabButtons = {}, {}
+    local rowCounters = {}
+    local rowDrag = nil
+
+    local function NextOrder(page)
+        rowCounters[page] = (rowCounters[page] or 0) + 1
+        return rowCounters[page]
+    end
+
+    -- Tạo hàng chức năng có tay cầm ≡ để kéo lên/xuống sắp xếp lại
+    local function NewRow(page)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -8, 0, 34)
+        row.BackgroundColor3 = COLOR_PANEL
+        row.BorderSizePixel = 0
+        row.LayoutOrder = NextOrder(page)
+        row.Parent = page
+        Corner(row, 6)
+
+        local handle = Instance.new("TextButton")
+        handle.Size = UDim2.fromOffset(26, 34)
+        handle.BackgroundTransparency = 1
+        handle.Text = "≡"
+        handle.Font = Enum.Font.GothamBold
+        handle.TextSize = 20
+        handle.TextColor3 = Color3.fromRGB(150, 150, 160)
+        handle.Parent = row
+
+        handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                rowDrag = { Row = row, Page = page }
+                page.ScrollingEnabled = false
+                row.BackgroundColor3 = COLOR_PANEL:Lerp(COLOR_ACCENT, 0.35)
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then
+                        rowDrag = nil
+                        page.ScrollingEnabled = true
+                        row.BackgroundColor3 = COLOR_PANEL
+                    end
+                end)
+            end
+        end)
+        return row
+    end
+
+    Track(UserInputService.InputChanged:Connect(function(input)
+        if not rowDrag then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        local row, page = rowDrag.Row, rowDrag.Page
+        local y = UserInputService:GetMouseLocation().Y
+        for _, other in ipairs(page:GetChildren()) do
+            if other:IsA("Frame") and other ~= row then
+                local top = other.AbsolutePosition.Y
+                if y > top and y < top + other.AbsoluteSize.Y then
+                    row.LayoutOrder, other.LayoutOrder = other.LayoutOrder, row.LayoutOrder
+                    break
+                end
+            end
+        end
+    end))
+
+    local function SelectTab(name)
+        for n, page in pairs(pages) do
+            page.Visible = (n == name)
+            tabButtons[n].BackgroundColor3 = (n == name) and COLOR_ACCENT or COLOR_PANEL
+        end
+    end
+
+    local function CreateTab(name)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1 / 3, -4, 1, 0)
+        btn.BackgroundColor3 = COLOR_PANEL
+        btn.TextColor3 = COLOR_TEXT
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 14
+        btn.Text = name
+        btn.Parent = tabBar
+        Corner(btn, 6)
+        tabButtons[name] = btn
+
+        local page = Instance.new("ScrollingFrame")
+        page.Size = UDim2.fromScale(1, 1)
+        page.BackgroundTransparency = 1
+        page.BorderSizePixel = 0
+        page.ScrollBarThickness = 4
+        page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        page.CanvasSize = UDim2.new()
+        page.Visible = false
+        page.Parent = pagesHolder
+        local layout = Instance.new("UIListLayout")
+        layout.Padding = UDim.new(0, 6)
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Parent = page
+        pages[name] = page
+
+        btn.MouseButton1Click:Connect(function() SelectTab(name) end)
+        return page
+    end
+
+    local function AddSection(page, text)
+        local l = MakeLabel(page, text, UDim2.new(1, -8, 0, 20))
+        l.Font = Enum.Font.GothamBold
+        l.TextColor3 = COLOR_ACCENT
+        l.TextSize = 13
+        l.LayoutOrder = NextOrder(page)
+    end
+
+    local function AddToggle(page, text, flag)
+        local row = NewRow(page)
+        MakeLabel(row, text, UDim2.new(1, -100, 1, 0), UDim2.fromOffset(28, 0))
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.fromOffset(60, 24)
+        btn.Position = UDim2.new(1, -66, 0.5, -12)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 13
+        btn.TextColor3 = Color3.new(1, 1, 1)
+        btn.Parent = row
+        Corner(btn, 6)
+
+        local function Refresh()
+            local on = StateManager.Flags[flag] == true
+            btn.Text = on and "ON" or "OFF"
+            btn.BackgroundColor3 = on and COLOR_ON or COLOR_OFF
+        end
+        Refresh()
+
+        btn.MouseButton1Click:Connect(function()
+            StateManager.Toggle(flag)
+        end)
+        StateManager.OnAnyChanged(function(name)
+            if name == flag then Refresh() end
+        end)
+    end
+
+    local function AddInput(page, text, key, minV, maxV)
+        local row = NewRow(page)
+        MakeLabel(row, text, UDim2.new(1, -110, 1, 0), UDim2.fromOffset(28, 0))
+
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.fromOffset(70, 24)
+        box.Position = UDim2.new(1, -76, 0.5, -12)
+        box.BackgroundColor3 = COLOR_BG
+        box.TextColor3 = COLOR_TEXT
+        box.Font = Enum.Font.GothamMedium
+        box.TextSize = 13
+        box.ClearTextOnFocus = false
+        box.Text = tostring(StateManager.Config[key])
+        box.Parent = row
+        Corner(box, 6)
+
+        box.FocusLost:Connect(function()
+            local value = tonumber(box.Text)
+            if value then
+                value = StateManager.SetConfig(key, value, minV, maxV)
+            else
+                value = StateManager.Config[key]
+            end
+            box.Text = tostring(value)
+        end)
+    end
+
+    -- TAB MAIN
+    local mainPage = CreateTab("Main")
+    AddSection(mainPage, "Phạm vi mặc định: 150 studs")
+    AddToggle(mainPage, "Tele Dron", "TeleDron")
+    AddToggle(mainPage, "Tele Kill", "TeleKill")
+    AddToggle(mainPage, "Aimbot", "Aimbot")
+    AddToggle(mainPage, "Aim Magic", "AimMagic")
+    AddToggle(mainPage, "Auto Bắn", "AutoFire")
+    AddInput(mainPage, "Scan Range", "ScanRange", 10, 2000)
+    AddInput(mainPage, "Drone Height", "DroneHeightOffset", 0, 200)
+    AddInput(mainPage, "Fire Interval", "FireInterval", 0.03, 5)
+
+    -- TAB ESP
+    local espPage = CreateTab("Esp")
+    AddSection(espPage, "Phạm vi mặc định: 150 studs")
+    AddToggle(espPage, "Esp Line", "EspLine")
+    AddToggle(espPage, "Esp Box", "EspBox")
+    AddToggle(espPage, "Esp Name", "EspName")
+    AddToggle(espPage, "Esp Distance", "EspDistance")
+    AddToggle(espPage, "Esp Hologram", "EspHologram")
+    AddToggle(espPage, "Esp Workspace", "EspWorkspace")
+
+    -- TAB KHÁC
+    local otherPage = CreateTab("Khác")
+    AddToggle(otherPage, "No Clip", "NoClip")
+    AddToggle(otherPage, "Fly Air", "FlyAir")
+    AddInput(otherPage, "Fly Speed", "FlySpeed", 1, 1000)
+    AddToggle(otherPage, "Speed", "Speed")
+    AddInput(otherPage, "Walk Speed", "WalkSpeed", 1, 1000)
+    AddToggle(otherPage, "Jumping Air", "JumpingAir")
+    AddToggle(otherPage, "Night Vision", "NightVision")
+    AddToggle(otherPage, "Fix Lag", "FixLag")
+
+    SelectTab("Main")
+
+    -- Collapse / expand
+    local collapsed = false
+    collapseBtn.MouseButton1Click:Connect(function()
+        collapsed = not collapsed
+        body.Visible = not collapsed
+        main.Size = collapsed and COLLAPSED_SIZE or FULL_SIZE
+        collapseBtn.Text = collapsed and "+" or "–"
+    end)
+
+    closeBtn.MouseButton1Click:Connect(function()
+        if globalEnv.__ModularControlMenu then
+            globalEnv.__ModularControlMenu.Shutdown()
+        end
+    end)
+
+    -- Fly buttons
+    local flyHolder = Instance.new("Frame")
+    flyHolder.Name = "FlyButtons"
+    flyHolder.BackgroundTransparency = 1
+    flyHolder.Size = UDim2.fromOffset(80, 170)
+    flyHolder.Position = UDim2.new(1, -100, 0.5, -85)
+    flyHolder.Visible = false
+    flyHolder.Parent = gui
+
+    local function FlyButton(text, yOffset, key)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(80, 80)
+        b.Position = UDim2.fromOffset(0, yOffset)
+        b.BackgroundColor3 = COLOR_ACCENT
+        b.BackgroundTransparency = 0.2
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 15
+        b.TextWrapped = true
+        b.Text = text
+        b.AutoButtonColor = true
+        b.Parent = flyHolder
+        Corner(b, 12)
+
+        b.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                MovementAndWorld.VerticalHeld[key] = true
+            end
+        end)
+        b.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                MovementAndWorld.VerticalHeld[key] = false
+            end
+        end)
+    end
+
+    FlyButton("▲ Lên cao", 0, "Up")
+    FlyButton("▼ Hạ thấp", 90, "Down")
+
+    StateManager.OnChanged("FlyAir", function(on)
+        flyHolder.Visible = on
+    end)
+end
+
+function UIController.Destroy()
+    if UIController.Gui then
+        UIController.Gui:Destroy()
+        UIController.Gui = nil
+    end
+end
+
+----------------------------------------------------------------------
+-- BOOTSTRAP
+----------------------------------------------------------------------
+local function Shutdown()
+    for name in pairs(StateManager.Flags) do
+        StateManager.Set(name, false)
+    end
+    CombatEngine.Cleanup()
+    EspEngine.Cleanup()
+    MovementAndWorld.Cleanup()
+    for _, conn in ipairs(Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    table.clear(Connections)
+    DrawingLayer.Shutdown()
+    UIController.Destroy()
+    globalEnv.__ModularControlMenu = nil
+end
+
+TargetScanner.Init()
+CombatEngine.Init()
+EspEngine.Init()
+MovementAndWorld.Init()
+UIController.Build()
+
+Track(RunService.Heartbeat:Connect(function(dt)
+    TargetScanner.Step(dt)
 end))
-UI.conns:Add(UIS.InputEnded:Connect(function(i)
-	if i.KeyCode == Enum.KeyCode.E then Move.Up = false elseif i.KeyCode == Enum.KeyCode.Q then Move.Down = false end
+
+Track(LocalPlayer.CharacterAdded:Connect(function()
+    CombatEngine.Locked = nil
+    DestroyFly()
+    DestroyDrone()
+    table.clear(noclipOriginal)
 end))
 
--- Hồi sinh/đổi nhân vật: tắt các chức năng gắn với nhân vật cũ để trạng thái luôn nhất quán
-local CHAR_FEATURES = { "TeleDron", "TeleKill", "FlyDown", "FlyDron", "FlyAir", "NoClip", "Speed", "JumpAir" }
-UI.conns:Add(LP.CharacterRemoving:Connect(function()
-	for _, n in ipairs(CHAR_FEATURES) do State.Set(n, false) end
-	Combat.Target = nil
-end))
-
-function UI.Shutdown() -- thoát: tắt hết, khôi phục Snapshot, dọn mọi connection/GUI
-	for name in pairs(State.Features) do State.Set(name, false) end
-	Esp.ClearAll(); wsClear()
-	if Esp.Gui then Esp.Gui:Destroy() end
-	if UI.Gui then UI.Gui:Destroy() end
-	UI.conns:Clean()
-end
-
-UI.Build()
+globalEnv.__ModularControlMenu = {
+    Shutdown = Shutdown,
+    StateManager = StateManager,
+    TargetScanner = TargetScanner,
+    CombatEngine = CombatEngine,
+    EspEngine = EspEngine,
+    MovementAndWorld = MovementAndWorld,
+    UIController = UIController,
+}
