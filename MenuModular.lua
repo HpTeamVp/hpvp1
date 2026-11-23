@@ -242,33 +242,84 @@ function CE:StopBury()
     if self._buryConn then self._buryConn:Disconnect(); self._buryConn=nil end
 end
 
--- Model Head Down: cắm đầu Mod xuống đất và vô hiệu tấn công
+-- Model Head Down: thân đứng yên tại chỗ, chỉ đầu bị cắm xuống đất, vô hiệu tấn công
+-- FIX: không lật CFrame của root (nguyên nhân gây bay lên trời do vật lý đẩy ngược).
+-- Thay vào đó giữ root cố định tuyệt đối và chỉ dịch chuyển riêng Head xuống dưới.
 CE._headDownConn = nil
+CE._headDownData = {} -- [model] = { walkSpeed, jumpPower } để khôi phục đúng khi tắt
+
 function CE:StartHeadDown()
-    if self._headDownConn then self._headDownConn:Disconnect() end
+    if self._headDownConn then
+        self._headDownConn:Disconnect()
+        self._headDownConn = nil
+    end
+    self._headDownData = {}
+
     self._headDownConn = RunService.Heartbeat:Connect(function()
         if not SM:Get("HeadDown") then return end
+
         for _, t in ipairs(TS:Scan()) do
-            local root = t.root
-            local hum  = t.model:FindFirstChildOfClass("Humanoid")
-            if root and hum then
-                -- Lật ngược model và chôn đầu
-                root.CFrame = CFrame.new(root.Position) * CFrame.Angles(math.pi, 0, 0)
-                    * CFrame.new(0, -SM.Params.HeadDownDepth, 0)
-                -- Vô hiệu tấn công bằng WalkSpeed=0
-                hum.WalkSpeed = 0
-                hum.JumpPower  = 0
+            local model = t.model
+            local root  = t.root
+            local hum   = model:FindFirstChildOfClass("Humanoid")
+            local head  = model:FindFirstChild("Head")
+
+            if not root or not hum or not head then continue end
+
+            -- Lưu snapshot lần đầu gặp mod này (chỉ lưu 1 lần, tránh ghi đè giá trị đã bị khoá)
+            if not self._headDownData[model] then
+                self._headDownData[model] = {
+                    walkSpeed = hum.WalkSpeed,
+                    jumpPower = hum.JumpPower,
+                }
             end
+
+            -- Vô hiệu khả năng tấn công / di chuyển
+            hum.WalkSpeed = 0
+            hum.JumpPower  = 0
+
+            -- Giữ thân đứng yên tuyệt đối, không đụng CFrame của root
+            root.AssemblyLinearVelocity  = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            -- Tính mốc mặt đất từ chân nhân vật rồi cắm đầu xuống theo độ sâu cấu hình
+            local groundY  = root.Position.Y - (root.Size.Y / 2)
+            local newHeadY = groundY - SM.Params.HeadDownDepth
+
+            head.CFrame = CFrame.new(root.Position.X, newHeadY, root.Position.Z)
+            head.AssemblyLinearVelocity  = Vector3.zero
+            head.AssemblyAngularVelocity = Vector3.zero
         end
     end)
 end
+
 function CE:StopHeadDown()
-    if self._headDownConn then self._headDownConn:Disconnect(); self._headDownConn=nil end
-    -- Khôi phục
-    for _, t in ipairs(TS:Scan()) do
-        local hum = t.model:FindFirstChildOfClass("Humanoid")
-        if hum then hum.WalkSpeed=16; hum.JumpPower=50 end
+    if self._headDownConn then
+        self._headDownConn:Disconnect()
+        self._headDownConn = nil
     end
+
+    -- Khôi phục từng mod đã bị ảnh hưởng, kể cả khi đã rời phạm vi quét
+    for model, data in pairs(self._headDownData) do
+        if model and model.Parent then
+            local hum  = model:FindFirstChildOfClass("Humanoid")
+            local head = model:FindFirstChild("Head")
+            local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
+
+            if hum then
+                hum.WalkSpeed = data.walkSpeed or 16
+                hum.JumpPower  = data.jumpPower or 50
+            end
+
+            -- Trả đầu về đúng vị trí trên cổ dựa theo kích thước thực tế
+            if head and root then
+                local neckOffset = root.Size.Y / 2 + head.Size.Y / 2 + 0.5
+                head.CFrame = CFrame.new(root.Position.X, root.Position.Y + neckOffset, root.Position.Z)
+            end
+        end
+    end
+
+    self._headDownData = {}
 end
 
 --------------------------------------------------------------------------------
@@ -721,7 +772,7 @@ local titleLabel = Instance.new("TextLabel")
 titleLabel.Size               = UDim2.new(1,-70,1,0)
 titleLabel.Position           = UDim2.fromOffset(8,0)
 titleLabel.BackgroundTransparency=1
-titleLabel.Text               = "Hp Team Pro V1"
+titleLabel.Text               = "Hằng Chân Ngắn Pro V3"
 titleLabel.TextColor3         = GREEN
 titleLabel.Font               = Enum.Font.GothamBold
 titleLabel.TextSize           = 14
