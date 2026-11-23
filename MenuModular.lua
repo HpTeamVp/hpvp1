@@ -231,8 +231,17 @@ Feature("Hitbox", function(m)
 					handle.CanCollide = false
 					handle.CFrame = t.Root.CFrame * CFrame.new(0, -depth, 0)
 				end
+				-- Xuyên tường: KHÔNG raycast kiểm tra vật cản. Mọi góc: KHÔNG kiểm tra hướng mặt,
+				-- và chạm nhiều bộ phận của mob (tối đa 8) nên trúng hitbox từ bất kỳ phía nào
 				if firetouchinterest then
-					pcall(function() firetouchinterest(handle, t.Root, 0) firetouchinterest(handle, t.Root, 1) end)
+					local k = 0
+					for _, part in ipairs(t.Model:GetDescendants()) do
+						if part:IsA("BasePart") then
+							pcall(function() firetouchinterest(handle, part, 0) firetouchinterest(handle, part, 1) end)
+							k += 1
+							if k >= 8 then break end
+						end
+					end
 				end
 				Combat:Attack(t, "Hitbox") -- vũ khí bắn/skill: xử lý trong AttackHook
 				if n >= 5 then break end -- giới hạn số mob mỗi nhịp để nhẹ CPU
