@@ -65,13 +65,14 @@ local State = {
 		DroneHeight = 6,      -- Fly Dron mặc định 6
 		FlyDownDepth = 6,     -- độ sâu dưới mặt đất (Fly Down)
 		FlySpeed = 60, WalkSpeed = 40,
+		UndergroundDepth = 15, UndergroundRange = 150, HeadDownRange = 150, -- Model Độn Thổ / Model head down
 		HitboxSize = 25, AimSmooth = 0.35, AttackInterval = 0.12, HoverRate = 15,
 	},
 	Runtime = { Vertical = 0 }, -- -1 / 0 / 1: nút giữ để tăng/giảm độ cao
 	_snap = {}, _listeners = {},
 }
 -- Các nhóm loại trừ: bật cái này thì tắt các cái còn lại trong nhóm
-local EXCLUSIVE = { { "FlyAir", "FlyDron", "FlyDown" }, { "TeleDron", "TeleKill" } }
+local EXCLUSIVE = { { "FlyAir", "FlyDron", "FlyDown" }, { "TeleDron", "TeleKill" }, { "ModelUnderground", "ModelHeadDown" } }
 local F, Cfg, RT = State.Flags, State.Config, State.Runtime
 
 function State.listen(flag, fn)
@@ -232,7 +233,6 @@ end
 
 -- Hitbox All Mod + All Mod Im: chạy theo nhịp ScanInterval, lưu/khôi phục giá trị gốc
 local hbOrig = setmetatable({}, { __mode = "k" })   -- root -> {Size, CanCollide, Transparency, Massless}
-local imOrig = setmetatable({}, { __mode = "k" })   -- humanoid -> {WalkSpeed, JumpPower, JumpHeight, AutoRotate}
 
 local function restoreHitbox(root)
 	local o = hbOrig[root]
@@ -241,12 +241,86 @@ local function restoreHitbox(root)
 	end
 	hbOrig[root] = nil
 end
-local function restoreMob(hum)
-	local o = imOrig[hum]
-	if o and hum.Parent then
-		hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = o.WalkSpeed, o.JumpPower, o.JumpHeight, o.AutoRotate
+
+-- Model Độn Thổ / Model head down -------------------------------------------
+-- poses[model] = { cf = pivot gốc, groundY, size, hum, ws, jp, jh, ar, ps, parts = {part -> {CanCollide, Massless}} }
+local poses = setmetatable({}, { __mode = "k" })
+local poseRay = RaycastParams.new()
+poseRay.FilterType = Enum.RaycastFilterType.Exclude
+
+local function restorePose(model, entry)
+	if not model.Parent then return end
+	local hum = entry.hum
+	if hum and hum.Parent then
+		hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate, hum.PlatformStand = entry.ws, entry.jp, entry.jh, entry.ar, entry.ps
 	end
-	imOrig[hum] = nil
+	for p, o in pairs(entry.parts) do
+		if p.Parent then p.CanCollide, p.Massless = o[1], o[2] end
+	end
+	-- trả về đúng độ cao + hướng ban đầu (giữ X/Z hiện tại vì server có thể đã đẩy mob đi)
+	local cur = model:GetPivot().Position
+	model:PivotTo(entry.cf.Rotation + Vector3.new(cur.X, entry.cf.Y, cur.Z))
+	local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
+	if root then root.AssemblyLinearVelocity = Vector3.zero root.AssemblyAngularVelocity = Vector3.zero end
+end
+local function clearPoses()
+	for m, e in pairs(poses) do restorePose(m, e) poses[m] = nil end
+end
+
+local function takePose(t)
+	local model = t.model
+	local cf = model:GetPivot()
+	poseRay.FilterDescendantsInstances = { model, LP.Character }
+	local hit = Workspace:Raycast(cf.Position + Vector3.new(0, 3, 0), Vector3.new(0, -300, 0), poseRay)
+	local e = {
+		cf = cf, groundY = hit and hit.Position.Y or (cf.Y - 3), size = model:GetExtentsSize(),
+		hum = t.hum, ws = t.hum.WalkSpeed, jp = t.hum.JumpPower, jh = t.hum.JumpHeight, ar = t.hum.AutoRotate, ps = t.hum.PlatformStand,
+		parts = {},
+	}
+	for _, p in model:GetDescendants() do
+		if p:IsA("BasePart") then e.parts[p] = { p.CanCollide, p.Massless } end
+	end
+	poses[model] = e
+	return e
+end
+
+-- Chạy mỗi Heartbeat để ghim vị trí (nếu chỉ chạy chậm mob sẽ bị vật lý đẩy bay lên trời)
+local function poseStep()
+	local active = {}
+	local wantDown, wantUnder = F.ModelHeadDown, F.ModelUnderground
+	for _, t in Scanner.get() do
+		local range = math.min(wantUnder and Cfg.UndergroundRange or Cfg.HeadDownRange, Cfg.ScanRange)
+		if t.dist <= range then
+			active[t.model] = true
+			local e = poses[t.model] or takePose(t)
+			-- mất khả năng tấn công / di chuyển
+			t.hum.WalkSpeed, t.hum.JumpPower, t.hum.JumpHeight, t.hum.AutoRotate = 0, 0, 0, false
+			t.hum.PlatformStand = true
+			local px, pz = e.cf.X, e.cf.Z -- giữ X/Z ban đầu: thân không bị trôi
+			local newCf
+			if wantUnder then
+				newCf = e.cf.Rotation + Vector3.new(px, e.groundY - Cfg.UndergroundDepth, pz)
+			else
+				-- Đảo ngược 180° quanh trục X: đầu chúc xuống đất, thân/chân còn ở vị trí cũ.
+				-- Tâm model = groundY + nửa chiều cao - 1.5 => đầu cắm sâu ~1.5 stud dưới mặt đất
+				local cy = e.groundY + e.size.Y / 2 - 1.5
+				newCf = CFrame.new(px, cy, pz) * (e.cf.Rotation * CFrame.Angles(math.pi, 0, 0))
+			end
+			for p, o in pairs(e.parts) do
+				if p.Parent then p.CanCollide, p.Massless = false, true end -- không va chạm => không bị hất văng lên trời
+			end
+			t.model:PivotTo(newCf)
+			t.root.AssemblyLinearVelocity = Vector3.zero
+			t.root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+	-- mob ra ngoài tầm: trả lại nguyên trạng; mob chết/biến mất: bỏ snapshot
+	for m, e in pairs(poses) do
+		if not active[m] then
+			if Scanner.validate(m) then restorePose(m, e) end
+			poses[m] = nil
+		end
+	end
 end
 
 local modAcc = 0
@@ -267,31 +341,28 @@ local function modStep(dt)
 			t.root.Transparency = 0.8
 			t.root.Massless = true
 		end
-		if F.AllModIm then
-			if not imOrig[t.hum] then
-				imOrig[t.hum] = { WalkSpeed = t.hum.WalkSpeed, JumpPower = t.hum.JumpPower, JumpHeight = t.hum.JumpHeight, AutoRotate = t.hum.AutoRotate }
-			end
-			-- Giữ mob đứng yên (không di chuyển / không đuổi được người chơi)
-			t.hum.WalkSpeed, t.hum.JumpPower, t.hum.JumpHeight, t.hum.AutoRotate = 0, 0, 0, false
-		end
 	end
 	-- trả lại mục tiêu đã ra ngoài tầm / chết / tắt tính năng
 	for root in pairs(hbOrig) do if not F.HitboxAll or not inRange[root] then restoreHitbox(root) end end
-	for hum in pairs(imOrig) do if not F.AllModIm or not inRange[hum] then restoreMob(hum) end end
 end
 
 local function updateCombatConns()
 	if F.TeleDron or F.TeleKill then Conn.set("combat", RunService.Heartbeat, combatStep) else Conn.drop("combat") end
 	if F.Aimbot then Conn.set("aim", RunService.RenderStepped, aimStep) else Conn.drop("aim") aimLast = nil end
-	if F.HitboxAll or F.AllModIm then
+	if F.HitboxAll then
 		Conn.set("mods", RunService.Heartbeat, modStep)
 	else
 		Conn.drop("mods")
 		for r in pairs(hbOrig) do restoreHitbox(r) end
-		for h in pairs(imOrig) do restoreMob(h) end
+	end
+	if F.ModelUnderground or F.ModelHeadDown then
+		Conn.set("pose", RunService.Heartbeat, poseStep)
+	else
+		Conn.drop("pose")
+		clearPoses() -- trả mob về nguyên trạng khi tắt
 	end
 end
-for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm" } do
+for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "ModelUnderground", "ModelHeadDown" } do
 	State.listen(f, function()
 		if not (F.TeleDron or F.TeleKill) then Combat.lock = nil end
 		updateCombatConns()
@@ -850,9 +921,13 @@ toggleRow("Main", "Tele Dron", "TeleDron")
 numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
 toggleRow("Main", "Hitbox All Mod", "HitboxAll")
 numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
-toggleRow("Main", "All Mod Im", "AllModIm")
 toggleRow("Main", "Tele Kill", "TeleKill")
 toggleRow("Main", "Aimbot", "Aimbot")
+toggleRow("Main", "Model Độn Thổ", "ModelUnderground")
+numberRow("Main", "  Phạm vi Độn Thổ", "UndergroundRange", 5, 500)
+numberRow("Main", "  Độ sâu Độn Thổ", "UndergroundDepth", 2, 200)
+toggleRow("Main", "Model head down", "ModelHeadDown")
+numberRow("Main", "  Phạm vi head down", "HeadDownRange", 5, 500)
 numberRow("Main", "  Phạm vi quét", "ScanRange", 10, 500)
 
 toggleRow("Esp", "Esp Line", "EspLine")
