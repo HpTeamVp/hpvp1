@@ -347,26 +347,41 @@ local function modStep(dt)
 end
 
 -- All Mod Im: mob vẫn chạy animation nhưng bị ghim X/Z tại chỗ => không đuổi được người chơi
-local imAnchor = setmetatable({}, { __mode = "k" }) -- model -> Vector3 vị trí neo
+local imAnchor = setmetatable({}, { __mode = "k" }) -- model -> {pos, rot, hum, ar}
+local function releaseIm(e)
+	if e.hum and e.hum.Parent then e.hum.AutoRotate = e.ar end
+end
 local function imStep()
 	local active = {}
 	for _, t in Scanner.get() do
 		if not poses[t.model] then -- Model Độn Thổ / head down đã tự ghim vị trí rồi
 			active[t.model] = true
 			local a = imAnchor[t.model]
-			if not a then a = t.root.Position imAnchor[t.model] = a end
+			if not a then
+				a = { pos = t.root.Position, rot = t.root.CFrame.Rotation, hum = t.hum, ar = t.hum.AutoRotate }
+				imAnchor[t.model] = a
+			end
+			t.hum.AutoRotate = false -- không tự xoay về phía người chơi
 			local cur = t.root.Position
-			-- chỉ ghim ngang; Y để vật lý xử lý nên mob vẫn đứng trên đất bình thường
-			t.root.CFrame = t.root.CFrame.Rotation + Vector3.new(a.X, cur.Y, a.Z)
+			-- ghim X/Z + hướng gốc (không xoay được); Y để vật lý xử lý nên mob vẫn đứng trên đất
+			t.root.CFrame = a.rot + Vector3.new(a.pos.X, cur.Y, a.pos.Z)
 			local v = t.root.AssemblyLinearVelocity
 			t.root.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+			t.root.AssemblyAngularVelocity = Vector3.zero
 		end
 	end
-	for m in pairs(imAnchor) do if not active[m] then imAnchor[m] = nil end end -- ra tầm/chết => thả neo
+	for m, a in pairs(imAnchor) do -- ra tầm / chết / bị Model-pose chiếm => thả neo, trả AutoRotate
+		if not active[m] then releaseIm(a) imAnchor[m] = nil end
+	end
 end
 
 local function updateCombatConns()
-	if F.AllModIm then Conn.set("im", RunService.Heartbeat, imStep) else Conn.drop("im") table.clear(imAnchor) end
+	if F.AllModIm then
+		Conn.set("im", RunService.Heartbeat, imStep)
+	else
+		Conn.drop("im")
+		for m, a in pairs(imAnchor) do releaseIm(a) imAnchor[m] = nil end
+	end
 	if F.TeleDron or F.TeleKill then Conn.set("combat", RunService.Heartbeat, combatStep) else Conn.drop("combat") end
 	if F.Aimbot then Conn.set("aim", RunService.RenderStepped, aimStep) else Conn.drop("aim") aimLast = nil end
 	if F.HitboxAll then
