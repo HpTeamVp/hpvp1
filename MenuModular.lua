@@ -551,12 +551,18 @@ local function flyStep(dt)
 	local move, v = hum.MoveDirection, RT.Vertical
 
 	if F.FlyAir then
-		-- Không bấm gì => Y = 0 => đứng yên giữa trời, không tự rơi
-		hrp.AssemblyLinearVelocity = move * Cfg.FlySpeed + Vector3.new(0, v * Cfg.FlySpeed, 0)
+		-- Trọng lực vẫn kéo xuống 1 chút mỗi bước vật lý, nên không chỉ đặt vận tốc:
+		-- ta giữ độ cao mục tiêu Move.airY, chỉ đổi khi bấm lên/xuống, và ghim lại Y mỗi khung hình.
+		local pos0 = hrp.Position
+		if not Move.airY or Move.airHrp ~= hrp then Move.airY, Move.airHrp = pos0.Y, hrp end
+		Move.airY += v * Cfg.FlySpeed * dt
+		local look = move.Magnitude > 0.1 and Vector3.new(move.X, 0, move.Z) or nil
+		local base = look and CFrame.lookAt(Vector3.new(pos0.X, Move.airY, pos0.Z), Vector3.new(pos0.X + look.X, Move.airY, pos0.Z + look.Z))
+			or (hrp.CFrame.Rotation + Vector3.new(pos0.X, Move.airY, pos0.Z))
+		hrp.CFrame = base
+		-- Y = 0 hoàn toàn: đứng yên giữa trời, không rơi / không trôi
+		hrp.AssemblyLinearVelocity = Vector3.new(move.X * Cfg.FlySpeed, 0, move.Z * Cfg.FlySpeed)
 		hrp.AssemblyAngularVelocity = Vector3.zero
-		if move.Magnitude > 0.1 then
-			hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + Vector3.new(move.X, 0, move.Z))
-		end
 		return
 	end
 
@@ -587,6 +593,7 @@ local function flyStep(dt)
 end
 
 local function refreshFly()
+	Move.airY = nil -- lấy lại độ cao hiện tại mỗi lần bật/tắt chế độ bay
 	if F.FlyAir or F.FlyDron or F.FlyDown then
 		local cam = Workspace.CurrentCamera
 		if cam then local l = cam.CFrame.LookVector Move.yaw = math.atan2(-l.X, -l.Z) end
