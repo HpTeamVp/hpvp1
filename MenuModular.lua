@@ -346,7 +346,27 @@ local function modStep(dt)
 	for root in pairs(hbOrig) do if not F.HitboxAll or not inRange[root] then restoreHitbox(root) end end
 end
 
+-- All Mod Im: mob vẫn chạy animation nhưng bị ghim X/Z tại chỗ => không đuổi được người chơi
+local imAnchor = setmetatable({}, { __mode = "k" }) -- model -> Vector3 vị trí neo
+local function imStep()
+	local active = {}
+	for _, t in Scanner.get() do
+		if not poses[t.model] then -- Model Độn Thổ / head down đã tự ghim vị trí rồi
+			active[t.model] = true
+			local a = imAnchor[t.model]
+			if not a then a = t.root.Position imAnchor[t.model] = a end
+			local cur = t.root.Position
+			-- chỉ ghim ngang; Y để vật lý xử lý nên mob vẫn đứng trên đất bình thường
+			t.root.CFrame = t.root.CFrame.Rotation + Vector3.new(a.X, cur.Y, a.Z)
+			local v = t.root.AssemblyLinearVelocity
+			t.root.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+		end
+	end
+	for m in pairs(imAnchor) do if not active[m] then imAnchor[m] = nil end end -- ra tầm/chết => thả neo
+end
+
 local function updateCombatConns()
+	if F.AllModIm then Conn.set("im", RunService.Heartbeat, imStep) else Conn.drop("im") table.clear(imAnchor) end
 	if F.TeleDron or F.TeleKill then Conn.set("combat", RunService.Heartbeat, combatStep) else Conn.drop("combat") end
 	if F.Aimbot then Conn.set("aim", RunService.RenderStepped, aimStep) else Conn.drop("aim") aimLast = nil end
 	if F.HitboxAll then
@@ -362,7 +382,7 @@ local function updateCombatConns()
 		clearPoses() -- trả mob về nguyên trạng khi tắt
 	end
 end
-for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "ModelUnderground", "ModelHeadDown" } do
+for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm", "ModelUnderground", "ModelHeadDown" } do
 	State.listen(f, function()
 		if not (F.TeleDron or F.TeleKill) then Combat.lock = nil end
 		updateCombatConns()
@@ -921,6 +941,7 @@ toggleRow("Main", "Tele Dron", "TeleDron")
 numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
 toggleRow("Main", "Hitbox All Mod", "HitboxAll")
 numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
+toggleRow("Main", "All Mod Im", "AllModIm")
 toggleRow("Main", "Tele Kill", "TeleKill")
 toggleRow("Main", "Aimbot", "Aimbot")
 toggleRow("Main", "Model Độn Thổ", "ModelUnderground")
