@@ -39,7 +39,7 @@ end
 local State = {
 	Flags = {}, Listeners = {}, OnChanged = {},
 	Config = { ScanRange = 150, SafeHeight = 12, DroneHeight = 6, FlySpeed = 50,
-		WalkSpeed = 32, HitboxSize = 15, WeaponReach = 15, AimSmooth = 0.35 },
+		WalkSpeed = 32, HitboxSize = 15, WeaponReach = 15, HitboxDepth = 6, AimSmooth = 0.35 },
 }
 function State:Get(k) return self.Flags[k] == true end
 function State:Set(k, v)
@@ -224,6 +224,13 @@ Feature("Hitbox", function(m)
 		for _, t in ipairs(Scanner:Get()) do
 			if t.Hum.Health > 0 and t.Root.Parent and (t.Root.Position - root.Position).Magnitude <= reach then
 				n += 1
+				-- Hitbox dưới lòng đất: đưa Handle (đã phóng to) xuống dưới chân mob rồi mới chạm,
+				-- nên đánh được từ dưới đất (kết hợp Fly Down + No Clip), mob cận chiến không với tới
+				local depth = State.Config.HitboxDepth
+				if depth > 0 then
+					handle.CanCollide = false
+					handle.CFrame = t.Root.CFrame * CFrame.new(0, -depth, 0)
+				end
 				if firetouchinterest then
 					pcall(function() firetouchinterest(handle, t.Root, 0) firetouchinterest(handle, t.Root, 1) end)
 				end
@@ -585,6 +592,7 @@ local main, esp, other = Tab("Main"), Tab("Esp"), Tab("Khác")
 Toggle(main, "Tele Dron", "TeleDron") Number(main, "Độ cao an toàn", "SafeHeight", 3, 60)
 Toggle(main, "Hitbox All Mod", "Hitbox") Number(main, "Cỡ hitbox mob (0=tắt)", "HitboxSize", 0, 80)
 Number(main, "Tầm vũ khí", "WeaponReach", 2, 80)
+Number(main, "Độ sâu hitbox (0=tắt)", "HitboxDepth", 0, 60)
 Toggle(main, "Tele Kill", "TeleKill") Toggle(main, "Aimbot", "Aimbot")
 Number(main, "Phạm vi quét", "ScanRange", 20, 500)
 Toggle(esp, "Esp Line", "EspLine") Toggle(esp, "Esp Box", "EspBox") Toggle(esp, "Esp Name", "EspName")
