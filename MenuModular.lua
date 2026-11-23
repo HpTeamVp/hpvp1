@@ -213,6 +213,25 @@ Feature("Hitbox", function(m)
 		end
 		for p in pairs(snap) do if not cur[p] then restore(p) end end -- ra khỏi tầm -> trả nguyên
 	end))
+	-- Sát thương THẬT trong đúng WeaponReach: mob nằm trong tầm (tính theo studs) mới bị đánh.
+	-- Kích hoạt va chạm Handle<->mob (nếu executor có firetouchinterest) rồi gọi AttackHook.
+	m:Give(every(0.1, function()
+		local root, c = hrp(), LP.Character
+		local tool = c and c:FindFirstChildOfClass("Tool")
+		local handle = tool and tool:FindFirstChild("Handle")
+		if not (root and handle and handle:IsA("BasePart")) then return end
+		local reach, n = State.Config.WeaponReach, 0
+		for _, t in ipairs(Scanner:Get()) do
+			if t.Hum.Health > 0 and t.Root.Parent and (t.Root.Position - root.Position).Magnitude <= reach then
+				n += 1
+				if firetouchinterest then
+					pcall(function() firetouchinterest(handle, t.Root, 0) firetouchinterest(handle, t.Root, 1) end)
+				end
+				Combat:Attack(t, "Hitbox") -- vũ khí bắn/skill: xử lý trong AttackHook
+				if n >= 5 then break end -- giới hạn số mob mỗi nhịp để nhẹ CPU
+			end
+		end
+	end))
 end)
 
 ---------------------------------------------------------------- EspEngine
