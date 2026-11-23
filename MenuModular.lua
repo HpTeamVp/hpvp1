@@ -213,40 +213,45 @@ Feature("Hitbox", function(m)
 		end
 		for p in pairs(snap) do if not cur[p] then restore(p) end end -- ra khỏi tầm -> trả nguyên
 	end))
-	-- Sát thương THẬT trong đúng WeaponReach: mob nằm trong tầm (tính theo studs) mới bị đánh.
-	-- Kích hoạt va chạm Handle<->mob (nếu executor có firetouchinterest) rồi gọi AttackHook.
-	m:Give(every(0.1, function()
+	-- Sát thương THẬT trong WeaponReach (đánh xuyên tường / dưới lòng đất).
+	-- Lỗi cũ: Weld kéo Handle về tay giữa các frame và chỉ chạm 0.1s/lần nên server không kịp ghi nhận.
+	-- Cách sửa: MỖI FRAME ghim Handle xuống dưới chân mob (luân phiên từng mob), chạm + tấn công liên tục.
+	local frame, lastTouch = 0, 0
+	m:Give(RunService.Stepped:Connect(function()
 		local root, c = hrp(), LP.Character
 		local tool = c and c:FindFirstChildOfClass("Tool")
 		local handle = tool and tool:FindFirstChild("Handle")
 		if not (root and handle and handle:IsA("BasePart")) then return end
-		local reach, n = State.Config.WeaponReach, 0
+		local reach, list = State.Config.WeaponReach, {}
 		for _, t in ipairs(Scanner:Get()) do
+			-- Xuyên tường: KHÔNG raycast vật cản; mọi góc: KHÔNG kiểm tra hướng mặt
 			if t.Hum.Health > 0 and t.Root.Parent and (t.Root.Position - root.Position).Magnitude <= reach then
-				n += 1
-				-- Hitbox dưới lòng đất: đưa Handle (đã phóng to) xuống dưới chân mob rồi mới chạm,
-				-- nên đánh được từ dưới đất (kết hợp Fly Down + No Clip), mob cận chiến không với tới
-				local depth = State.Config.HitboxDepth
-				if depth > 0 then
-					handle.CanCollide = false
-					handle.CFrame = t.Root.CFrame * CFrame.new(0, -depth, 0)
-				end
-				-- Xuyên tường: KHÔNG raycast kiểm tra vật cản. Mọi góc: KHÔNG kiểm tra hướng mặt,
-				-- và chạm nhiều bộ phận của mob (tối đa 8) nên trúng hitbox từ bất kỳ phía nào
-				if firetouchinterest then
-					local k = 0
-					for _, part in ipairs(t.Model:GetDescendants()) do
-						if part:IsA("BasePart") then
-							pcall(function() firetouchinterest(handle, part, 0) firetouchinterest(handle, part, 1) end)
-							k += 1
-							if k >= 8 then break end
-						end
-					end
-				end
-				Combat:Attack(t, "Hitbox") -- vũ khí bắn/skill: xử lý trong AttackHook
-				if n >= 5 then break end -- giới hạn số mob mỗi nhịp để nhẹ CPU
+				list[#list + 1] = t
+				if #list >= 5 then break end -- giới hạn 5 mob để nhẹ CPU
 			end
 		end
+		if #list == 0 then return end
+		frame += 1
+		local t = list[(frame % #list) + 1]
+		handle.CanTouch, handle.CanCollide = true, false
+		local depth = State.Config.HitboxDepth
+		if depth > 0 then -- hitbox dưới lòng đất: Handle nằm dưới chân mob, mob cận chiến không với tới
+			handle.CFrame = t.Root.CFrame * CFrame.new(0, -depth, 0)
+			handle.AssemblyLinearVelocity = Vector3.zero
+		end
+		local now = os.clock()
+		if firetouchinterest and now - lastTouch >= 0.05 then
+			lastTouch = now
+			local k = 0 -- chạm nhiều bộ phận (tối đa 8) => trúng hitbox từ mọi phía
+			for _, part in ipairs(t.Model:GetDescendants()) do
+				if part:IsA("BasePart") then
+					pcall(function() firetouchinterest(handle, part, 0) firetouchinterest(handle, part, 1) end)
+					k += 1
+					if k >= 8 then break end
+				end
+			end
+		end
+		Combat:Attack(t, "Hitbox") -- vũ khí bắn/skill: xử lý trong AttackHook
 	end))
 end)
 
