@@ -1,1199 +1,924 @@
---!nonstrict
 --[[
-	HpTeamProMenu (LocalScript - FILE ĐẦY ĐỦ, chỉ cần dán 1 file)
-	Vị trí: StarterPlayer > StarterPlayerScripts > LocalScript (tên bất kỳ)
+	DebugConsole.client.lua  (LocalScript)
+	Đặt trong StarterPlayer > StarterPlayerScripts. Dành cho debug / test trong game của bạn.
 
-	=== API NHANH ===
-	-- (Trong file này UIController đã nằm sẵn bên dưới, không cần require)
-	local ui = UIController.new({
-		Title = "Hp Team Pro V1",        -- tiêu đề
-		Size = Vector2.new(350, 200),    -- kích thước khi mở rộng
-		Position = Vector2.new(24, 80),  -- vị trí ban đầu (pixel)
-		Tabs = { "Main", "Esp", "Khác" },-- danh sách tab
-		ToggleKey = Enum.KeyCode.RightShift, -- (tuỳ chọn) phím ẩn/hiện trên PC
-	})
+	Cấu trúc module (đều nằm trong 1 file cho dễ dán, có thể tách thành ModuleScript):
+	  Conn / Util -> StateManager -> TargetScanner -> CombatEngine -> EspEngine -> MovementAndWorld -> UIController
 
-	Thêm điều khiển:
-	ui:AddSection(tab, text)
-	ui:AddToggle(tab, { Id, Text, Default, Callback(state) })
-	ui:AddNumber(tab, { Id, Text, Min, Max, Step, Default, Decimals, Callback(value) })
-	ui:AddButton(tab, { Text, Callback() })
-
-	Đọc / ghi từ module khác:
-	ui:GetValue(id)                      -- bool (toggle) hoặc number
-	ui:SetValue(id, value, fireEvent)    -- cập nhật từ bên ngoài (mặc định KHÔNG bắn event)
-	ui:GetControl(id)                    -- handle: :Get() :Set(v, fire) .Changed:Connect(fn)
-	ui:GetState()                        -- { Toggles = {...}, Numbers = {...} }
-
-	Sự kiện: ui.ToggleChanged(id, state) | ui.NumberChanged(id, value)
-	         ui.TabChanged(name) | ui.CollapsedChanged(collapsed) | ui.Closed()
-
-	Điều khiển cửa sổ: ui:SelectTab(name) | ui:SetCollapsed(bool) | ui:SetVisible(bool) | ui:Destroy()
+	CÁCH CẮM TẤN CÔNG CỦA GAME: sửa hàm Combat.AttackHook(target, mode) (tìm "ATTACK HOOK" bên dưới).
+	Ví dụ: tool:Activate(), hoặc FireServer vào RemoteEvent đánh/skill của game bạn.
 ]]
 
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local LP = Players.LocalPlayer
 
-----------------------------------------------------------------------
--- HẰNG SỐ & GIAO DIỆN
-----------------------------------------------------------------------
-local TITLE_HEIGHT = 30
-local TAB_HEIGHT = 26
-local DEFAULT_SIZE = Vector2.new(350, 200)
-local DEFAULT_TABS = { "Main", "Esp", "Khác" }
+--------------------------------------------------------------------------------
+-- Conn: quản lý kết nối sự kiện theo key, chống rò rỉ khi bật/tắt nhiều lần
+--------------------------------------------------------------------------------
+local Conn, _store = {}, {}
+function Conn.drop(key)
+	local c = _store[key]
+	if c then c:Disconnect() _store[key] = nil end
+end
+function Conn.set(key, signal, fn) -- luôn ngắt kết nối cũ cùng key trước khi nối mới
+	Conn.drop(key)
+	_store[key] = signal:Connect(fn)
+end
+function Conn.has(key) return _store[key] ~= nil end
+function Conn.dropAll() for k in pairs(_store) do Conn.drop(k) end end
 
-local THEME = {
-	Background = Color3.fromHex("0C0E0C"),
-	Panel = Color3.fromHex("141814"),
-	PanelStroke = Color3.fromHex("1F2B1F"),
-	Accent = Color3.fromHex("00FF66"),
-	AccentDim = Color3.fromHex("0F3D22"),
-	Text = Color3.fromHex("DCE8DC"),
-	TextMuted = Color3.fromHex("86998A"),
-	OffBadge = Color3.fromHex("3A1A1A"),
-	OffText = Color3.fromHex("FF6B6B"),
-	Track = Color3.fromHex("26302A"),
-	Knob = Color3.fromHex("F2FFF6"),
+--------------------------------------------------------------------------------
+-- Util
+--------------------------------------------------------------------------------
+local Util = {}
+function Util.hum()
+	local c = LP.Character
+	local h = c and c:FindFirstChildOfClass("Humanoid")
+	if h and h.Health > 0 then return h end
+end
+function Util.hrp()
+	local c = LP.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+function Util.dist(pos)
+	local r = Util.hrp()
+	return r and (r.Position - pos).Magnitude or math.huge
+end
+function Util.safe(fn, ...)
+	local ok, err = pcall(fn, ...)
+	if not ok then warn("[DebugConsole] " .. tostring(err)) end
+end
+
+--------------------------------------------------------------------------------
+-- StateManager: cờ bật/tắt, cấu hình, snapshot giá trị gốc
+--------------------------------------------------------------------------------
+local State = {
+	Flags = {},
+	Config = {
+		ScanRange = 150, ScanInterval = 0.15,
+		SafeHeight = 12,      -- khoảng cách an toàn phía trên mục tiêu (Tele Dron)
+		KillDistance = 4,     -- đứng sau lưng mục tiêu (Tele Kill)
+		DroneHeight = 6,      -- Fly Dron mặc định 6
+		FlyDownDepth = 6,     -- độ sâu dưới mặt đất (Fly Down)
+		FlySpeed = 60, WalkSpeed = 40,
+		HitboxSize = 25, AimSmooth = 0.35, AttackInterval = 0.12, HoverRate = 15,
+	},
+	Runtime = { Vertical = 0 }, -- -1 / 0 / 1: nút giữ để tăng/giảm độ cao
+	_snap = {}, _listeners = {},
 }
+-- Các nhóm loại trừ: bật cái này thì tắt các cái còn lại trong nhóm
+local EXCLUSIVE = { { "FlyAir", "FlyDron", "FlyDown" }, { "TeleDron", "TeleKill" } }
+local F, Cfg, RT = State.Flags, State.Config, State.Runtime
 
-----------------------------------------------------------------------
--- HÀM TIỆN ÍCH TẠO GUI
-----------------------------------------------------------------------
--- Tạo Instance, gán thuộc tính, Parent gán sau cùng để tối ưu.
-local function create(className, props, parent)
-	local instance = Instance.new(className)
-	for key, value in pairs(props) do
-		instance[key] = value
-	end
-	if parent then
-		instance.Parent = parent
-	end
-	return instance
+function State.listen(flag, fn)
+	State._listeners[flag] = State._listeners[flag] or {}
+	table.insert(State._listeners[flag], fn)
 end
-
-local function merge(defaults, overrides)
-	for key, value in pairs(overrides) do
-		defaults[key] = value
-	end
-	return defaults
-end
-
-local function newLabel(props, parent)
-	return create("TextLabel", merge({
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Font = Enum.Font.Gotham,
-		TextSize = 13,
-		TextColor3 = THEME.Text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Text = "",
-	}, props), parent)
-end
-
-local function newButton(props, parent)
-	return create("TextButton", merge({
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		AutoButtonColor = false,
-		Font = Enum.Font.GothamBold,
-		TextSize = 13,
-		TextColor3 = THEME.Text,
-		Text = "",
-	}, props), parent)
-end
-
-local function addCorner(instance, radius)
-	return create("UICorner", { CornerRadius = UDim.new(0, radius) }, instance)
-end
-
--- Lưu ý: với TextButton/TextBox phải ép ApplyStrokeMode = Border, nếu không stroke sẽ viền chữ.
-local function addStroke(instance, color, thickness, transparency)
-	return create("UIStroke", {
-		Color = color,
-		Thickness = thickness,
-		Transparency = transparency or 0,
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-	}, instance)
-end
-
-local function tween(instance, props, duration)
-	local info = TweenInfo.new(duration or 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	local t = TweenService:Create(instance, info, props)
-	t:Play()
-	return t
-end
-
-local function applyProps(instance, props, instant)
-	if instant then
-		for key, value in pairs(props) do
-			instance[key] = value
+function State.set(flag, value)
+	value = value and true or false
+	if F[flag] == value then return end
+	if value then
+		for _, group in EXCLUSIVE do
+			if table.find(group, flag) then
+				for _, other in group do
+					if other ~= flag then State.set(other, false) end
+				end
+			end
 		end
+	end
+	F[flag] = value
+	for _, fn in State._listeners[flag] or {} do Util.safe(fn, value) end
+end
+function State.save(key, getter) -- chỉ lưu lần đầu, không ghi đè bản gốc
+	if State._snap[key] == nil then State._snap[key] = { v = getter() } end
+end
+function State.take(key) -- lấy và xóa snapshot
+	local s = State._snap[key]
+	State._snap[key] = nil
+	return s and s.v
+end
+
+--------------------------------------------------------------------------------
+-- TargetScanner: quét bằng GetPartBoundsInRadius + cache theo ScanInterval
+--------------------------------------------------------------------------------
+local Scanner = { cache = {}, last = 0 }
+local overlap = OverlapParams.new()
+overlap.FilterType = Enum.RaycastFilterType.Exclude
+local losParams = RaycastParams.new()
+losParams.FilterType = Enum.RaycastFilterType.Exclude
+
+-- Trả về humanoid, root nếu Model hợp lệ (NPC/Mob còn sống, không phải người chơi)
+function Scanner.validate(model)
+	if not model or not model.Parent or not model:IsA("Model") then return nil end
+	if model == LP.Character or Players:GetPlayerFromCharacter(model) then return nil end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return nil end
+	local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+	if not root then return nil end
+	return hum, root
+end
+
+function Scanner.get(force)
+	local now = os.clock()
+	if not force and now - Scanner.last < Cfg.ScanInterval then return Scanner.cache end
+	Scanner.last = now
+	local myRoot = Util.hrp()
+	local list = {}
+	if myRoot then
+		overlap.FilterDescendantsInstances = { LP.Character }
+		local seen = {}
+		for _, part in Workspace:GetPartBoundsInRadius(myRoot.Position, Cfg.ScanRange, overlap) do
+			local m = part
+			while m and m ~= Workspace do -- đi lên tới Model có Humanoid
+				if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then break end
+				m = m.Parent
+			end
+			if m and m ~= Workspace and not seen[m] then
+				seen[m] = true
+				local hum, root = Scanner.validate(m)
+				if hum then
+					local d = (root.Position - myRoot.Position).Magnitude
+					if d <= Cfg.ScanRange then
+						-- khả năng tiếp cận: bị che thì cộng phạt khoảng cách để ưu tiên mục tiêu thấy được
+						losParams.FilterDescendantsInstances = { LP.Character, m }
+						local blocked = Workspace:Raycast(myRoot.Position, root.Position - myRoot.Position, losParams)
+						table.insert(list, { model = m, root = root, hum = hum, dist = d, score = d + (blocked and 25 or 0) })
+					end
+				end
+			end
+		end
+		table.sort(list, function(a, b) return a.score < b.score end)
+	end
+	Scanner.cache = list
+	return list
+end
+
+--------------------------------------------------------------------------------
+-- CombatEngine
+--------------------------------------------------------------------------------
+local Combat = { lock = nil, lastAtk = 0, lastSwitch = 0 }
+
+-- ===== ATTACK HOOK: cắm cơ chế đánh/bắn của game vào đây =====
+-- target: Model mục tiêu; mode: "TeleDron" | "TeleKill"
+-- Mặc định: kích hoạt Tool đang cầm. Nếu game dùng RemoteEvent, ví dụ:
+--   game.ReplicatedStorage.Remotes.Attack:FireServer(target)
+Combat.AttackHook = function(target, mode)
+	local tool = LP.Character and LP.Character:FindFirstChildOfClass("Tool")
+	if tool then tool:Activate() end
+end
+
+function Combat.attack(target, mode)
+	local now = os.clock()
+	if now - Combat.lastAtk < Cfg.AttackInterval then return end
+	Combat.lastAtk = now
+	Util.safe(Combat.AttackHook, target, mode)
+end
+
+-- Khóa mục tiêu tạm thời: giữ nếu còn sống & trong tầm, ngược lại tự chuyển sang mục tiêu gần nhất
+function Combat.pick()
+	local lock = Combat.lock
+	if lock then
+		local hum, root = Scanner.validate(lock)
+		if hum and Util.dist(root.Position) <= Cfg.ScanRange then return lock, root end
+		Combat.lock = nil
+	end
+	local best = Scanner.get(true)[1]
+	if best then
+		Combat.lock = best.model
+		Combat.lastSwitch = os.clock()
+		return best.model, best.root
+	end
+end
+
+local function combatStep()
+	if not (F.TeleDron or F.TeleKill) then return end
+	local hrp = Util.hrp()
+	if not hrp then return end
+	local model, root = Combat.pick()
+	if not model then return end
+	local pos, mode
+	if F.TeleDron then
+		pos = root.Position + Vector3.new(0, Cfg.SafeHeight, 0) -- lơ lửng trên đầu mob, né cận chiến
+		mode = "TeleDron"
 	else
-		tween(instance, props)
+		pos = root.Position - root.CFrame.LookVector * Cfg.KillDistance
+		mode = "TeleKill"
+	end
+	-- upVector tùy chọn tránh lỗi suy biến khi nhìn thẳng xuống
+	hrp.CFrame = CFrame.lookAt(pos, root.Position, Vector3.new(0, 0, -1))
+	hrp.AssemblyLinearVelocity = Vector3.zero -- triệt tiêu lực rơi / đẩy lùi
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	Combat.attack(model, mode)
+end
+
+-- Aimbot: lerp camera, có ramp-up sau khi đổi mục tiêu để chống giật
+local aimBlend, aimLast = 0, nil
+local function aimStep(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+	local model, root = Combat.pick()
+	if not model then aimLast = nil return end
+	if model ~= aimLast then aimLast, aimBlend = model, 0 end
+	aimBlend = math.min(1, aimBlend + dt / 0.15)
+	local part = model:FindFirstChild("Head") or root
+	local want = CFrame.lookAt(cam.CFrame.Position, part.Position)
+	local alpha = math.clamp(Cfg.AimSmooth * aimBlend * (dt * 60), 0, 1)
+	cam.CFrame = cam.CFrame:Lerp(want, alpha)
+end
+
+-- Hitbox All Mod + All Mod Im: chạy theo nhịp ScanInterval, lưu/khôi phục giá trị gốc
+local hbOrig = setmetatable({}, { __mode = "k" })   -- root -> {Size, CanCollide, Transparency, Massless}
+local imOrig = setmetatable({}, { __mode = "k" })   -- humanoid -> {WalkSpeed, JumpPower, JumpHeight, AutoRotate}
+
+local function restoreHitbox(root)
+	local o = hbOrig[root]
+	if o and root.Parent then
+		root.Size, root.CanCollide, root.Transparency, root.Massless = o.Size, o.CanCollide, o.Transparency, o.Massless
+	end
+	hbOrig[root] = nil
+end
+local function restoreMob(hum)
+	local o = imOrig[hum]
+	if o and hum.Parent then
+		hum.WalkSpeed, hum.JumpPower, hum.JumpHeight, hum.AutoRotate = o.WalkSpeed, o.JumpPower, o.JumpHeight, o.AutoRotate
+	end
+	imOrig[hum] = nil
+end
+
+local modAcc = 0
+local function modStep(dt)
+	modAcc += dt
+	if modAcc < 0.2 then return end
+	modAcc = 0
+	local inRange = {}
+	for _, t in Scanner.get() do
+		inRange[t.root], inRange[t.hum] = true, true
+		if F.HitboxAll then
+			if not hbOrig[t.root] then
+				hbOrig[t.root] = { Size = t.root.Size, CanCollide = t.root.CanCollide, Transparency = t.root.Transparency, Massless = t.root.Massless }
+			end
+			-- phóng to HRP: phủ cả vùng dưới đất / sau tường để đòn đánh vẫn trúng
+			t.root.Size = Vector3.one * Cfg.HitboxSize
+			t.root.CanCollide = false
+			t.root.Transparency = 0.8
+			t.root.Massless = true
+		end
+		if F.AllModIm then
+			if not imOrig[t.hum] then
+				imOrig[t.hum] = { WalkSpeed = t.hum.WalkSpeed, JumpPower = t.hum.JumpPower, JumpHeight = t.hum.JumpHeight, AutoRotate = t.hum.AutoRotate }
+			end
+			-- Giữ mob đứng yên (không di chuyển / không đuổi được người chơi)
+			t.hum.WalkSpeed, t.hum.JumpPower, t.hum.JumpHeight, t.hum.AutoRotate = 0, 0, 0, false
+		end
+	end
+	-- trả lại mục tiêu đã ra ngoài tầm / chết / tắt tính năng
+	for root in pairs(hbOrig) do if not F.HitboxAll or not inRange[root] then restoreHitbox(root) end end
+	for hum in pairs(imOrig) do if not F.AllModIm or not inRange[hum] then restoreMob(hum) end end
+end
+
+local function updateCombatConns()
+	if F.TeleDron or F.TeleKill then Conn.set("combat", RunService.Heartbeat, combatStep) else Conn.drop("combat") end
+	if F.Aimbot then Conn.set("aim", RunService.RenderStepped, aimStep) else Conn.drop("aim") aimLast = nil end
+	if F.HitboxAll or F.AllModIm then
+		Conn.set("mods", RunService.Heartbeat, modStep)
+	else
+		Conn.drop("mods")
+		for r in pairs(hbOrig) do restoreHitbox(r) end
+		for h in pairs(imOrig) do restoreMob(h) end
 	end
 end
-
-----------------------------------------------------------------------
--- HÀM TIỆN ÍCH SỐ (validate / làm tròn / định dạng)
-----------------------------------------------------------------------
--- Đếm số chữ số thập phân của bước nhảy (0.25 -> 2, 1 -> 0).
-local function countDecimals(n)
-	local s = string.format("%.6f", n)
-	s = string.gsub(s, "0+$", "")
-	local fraction = string.match(s, "%.(%d*)$") or ""
-	return #fraction
+for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm" } do
+	State.listen(f, function()
+		if not (F.TeleDron or F.TeleKill) then Combat.lock = nil end
+		updateCombatConns()
+	end)
 end
 
-local function formatNumber(value, decimals)
-	return string.format("%." .. tostring(decimals) .. "f", value)
+--------------------------------------------------------------------------------
+-- EspEngine (dựng bằng GUI + Highlight, không phụ thuộc Drawing API)
+--------------------------------------------------------------------------------
+local Esp = { entries = {}, items = {}, itemAcc = 0 }
+local espGui, hlFolder
+
+local function ensureEspLayer()
+	if espGui and espGui.Parent then return end
+	espGui = Instance.new("ScreenGui")
+	espGui.Name, espGui.ResetOnSpawn, espGui.IgnoreGuiInset, espGui.DisplayOrder = "EspLayer", false, true, 50
+	espGui.Parent = LP:WaitForChild("PlayerGui")
+	hlFolder = Instance.new("Folder")
+	hlFolder.Name = "EspHighlights"
+	hlFolder.Parent = Workspace.CurrentCamera
 end
 
--- Chỉ chấp nhận dạng số thuần: "12", "-3.5", ".5", "7,5". Từ chối chữ, hex, 1e3...
-local function parseNumberText(text)
-	local cleaned = string.gsub(text, "%s", "")
-	cleaned = string.gsub(cleaned, ",", ".")
-	if string.match(cleaned, "^[-+]?%d+%.?%d*$") or string.match(cleaned, "^[-+]?%.%d+$") then
-		return tonumber(cleaned)
+local function mkLabel(color)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency, l.TextColor3, l.TextStrokeTransparency = 1, color, 0.3
+	l.Font, l.TextSize, l.Size, l.AnchorPoint = Enum.Font.GothamBold, 13, UDim2.fromOffset(160, 14), Vector2.new(0.5, 1)
+	l.Parent = espGui
+	return l
+end
+
+local function newEntry()
+	return {}
+end
+local function dropField(e, k)
+	if e[k] then e[k]:Destroy() e[k] = nil end
+end
+local function dropEntry(model)
+	local e = Esp.entries[model]
+	if e then
+		for k in pairs(e) do dropField(e, k) end
+		Esp.entries[model] = nil
 	end
-	return nil
+end
+function Esp.clearAll()
+	for m in pairs(Esp.entries) do dropEntry(m) end
+	for inst, hl in pairs(Esp.items) do hl:Destroy() Esp.items[inst] = nil end
 end
 
-----------------------------------------------------------------------
--- SIGNAL NHẸ (không phụ thuộc BindableEvent)
-----------------------------------------------------------------------
-local Signal = {}
-Signal.__index = Signal
-
-function Signal.new()
-	return setmetatable({ _connections = {}, _destroyed = false }, Signal)
+-- 3D bounding box -> hình chữ nhật 2D (World-to-Screen), nil nếu một góc nằm sau camera
+local SIGN = { -1, 1 }
+local function screenRect(model, cam)
+	local cf, size = model:GetBoundingBox()
+	local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
+	local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+	for _, sx in SIGN do for _, sy in SIGN do for _, sz in SIGN do
+		local v = cam:WorldToViewportPoint(cf:PointToWorldSpace(Vector3.new(sx * hx, sy * hy, sz * hz)))
+		if v.Z <= 0 then return nil end
+		minX, maxX = math.min(minX, v.X), math.max(maxX, v.X)
+		minY, maxY = math.min(minY, v.Y), math.max(maxY, v.Y)
+	end end end
+	return minX, minY, maxX, maxY
 end
 
-function Signal:Connect(callback)
-	assert(type(callback) == "function", "[Signal] Connect cần một function")
-	local signal = self
-	local connection = { Connected = not self._destroyed, _callback = callback }
+local function espTargetStep(cam)
+	local seen = {}
+	local vp = cam.ViewportSize
+	for _, t in Scanner.get() do
+		local model = t.model
+		local hum, root = Scanner.validate(model) -- chết/biến mất -> bị loại ngay, entry bị xóa bên dưới
+		if hum then
+			local dist = Util.dist(root.Position)
+			if dist <= Cfg.ScanRange then
+				seen[model] = true
+				local e = Esp.entries[model] or newEntry()
+				Esp.entries[model] = e
+				local sp = cam:WorldToViewportPoint(root.Position)
+				local onScreen = sp.Z > 0
 
-	function connection:Disconnect()
-		self.Connected = false
-		signal._connections[self] = nil
-	end
+				-- Line: từ cạnh trên giữa màn hình tới mục tiêu
+				if F.EspLine and onScreen then
+					if not e.line then
+						e.line = Instance.new("Frame")
+						e.line.AnchorPoint, e.line.BorderSizePixel = Vector2.new(0.5, 0.5), 0
+						e.line.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+						e.line.Parent = espGui
+					end
+					local a, b = Vector2.new(vp.X / 2, 0), Vector2.new(sp.X, sp.Y)
+					local d = b - a
+					e.line.Size = UDim2.fromOffset(d.Magnitude, 1.5)
+					e.line.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+					e.line.Rotation = math.deg(math.atan2(d.Y, d.X))
+				else
+					dropField(e, "line")
+				end
 
-	if connection.Connected then
-		self._connections[connection] = true
+				-- Box / Name / Distance dùng chung hình chữ nhật 2D
+				local needRect = F.EspBox or F.EspName or F.EspDistance
+				local x1, y1, x2, y2
+				if needRect then x1, y1, x2, y2 = screenRect(model, cam) end
+				if x1 and F.EspBox then
+					if not e.box then
+						e.box = Instance.new("Frame")
+						e.box.BackgroundTransparency, e.box.BorderSizePixel = 1, 0
+						local s = Instance.new("UIStroke")
+						s.Color, s.Thickness = Color3.fromRGB(255, 255, 0), 1.5
+						s.Parent = e.box
+						e.box.Parent = espGui
+					end
+					e.box.Position = UDim2.fromOffset(x1, y1)
+					e.box.Size = UDim2.fromOffset(x2 - x1, y2 - y1)
+				else
+					dropField(e, "box")
+				end
+				if x1 and F.EspName then
+					e.name = e.name or mkLabel(Color3.new(1, 1, 1))
+					e.name.Text = model.Name
+					e.name.Position = UDim2.fromOffset((x1 + x2) / 2, y1 - 2)
+				else
+					dropField(e, "name")
+				end
+				if x1 and F.EspDistance then
+					e.dist = e.dist or mkLabel(Color3.fromRGB(120, 220, 255))
+					e.dist.AnchorPoint = Vector2.new(0.5, 0)
+					e.dist.Text = string.format("%.0f studs (%.0f m)", dist, dist * 0.28)
+					e.dist.Position = UDim2.fromOffset((x1 + x2) / 2, y2 + 2)
+				else
+					dropField(e, "dist")
+				end
+
+				-- Hologram: Highlight xuyên vật cản
+				if F.EspHologram then
+					if not e.hl then
+						local h = Instance.new("Highlight")
+						h.FillColor, h.OutlineColor = Color3.fromRGB(255, 60, 60), Color3.new(1, 1, 1)
+						h.FillTransparency, h.DepthMode = 0.6, Enum.HighlightDepthMode.AlwaysOnTop
+						h.Adornee, h.Parent = model, hlFolder
+						e.hl = h
+					end
+				else
+					dropField(e, "hl")
+				end
+			end
+		end
 	end
-	return connection
+	for m in pairs(Esp.entries) do if not seen[m] then dropEntry(m) end end
 end
 
-function Signal:Fire(...)
-	-- Chụp danh sách trước để Disconnect trong lúc Fire vẫn an toàn.
-	local snapshot = {}
-	for connection in pairs(self._connections) do
-		table.insert(snapshot, connection)
-	end
-	for _, connection in ipairs(snapshot) do
-		if connection.Connected then
-			task.spawn(connection._callback, ...) -- lỗi ở 1 handler không làm hỏng handler khác
+-- Esp Workspace: quét an toàn workspace.Item (có thể chưa tồn tại / bị xóa giữa chừng)
+local function collectItems(parent, out, depth)
+	for _, obj in parent:GetChildren() do
+		if obj:IsA("Model") or obj:IsA("BasePart") then
+			out[#out + 1] = obj
+		elseif depth < 3 and (obj:IsA("Folder") or obj:IsA("Configuration")) then
+			collectItems(obj, out, depth + 1)
 		end
 	end
 end
-
-function Signal:Destroy()
-	self._destroyed = true
-	for connection in pairs(self._connections) do
-		connection.Connected = false
-	end
-	table.clear(self._connections)
-end
-
-----------------------------------------------------------------------
--- UICONTROLLER
-----------------------------------------------------------------------
-local UIController = {}
-UIController.__index = UIController
-
-local SIGNAL_NAMES = { "ToggleChanged", "NumberChanged", "TabChanged", "CollapsedChanged", "Closed" }
-
-function UIController.new(options)
-	options = options or {}
-	assert(Players.LocalPlayer, "[UIController] Chỉ chạy được ở phía Client")
-
-	local self = setmetatable({}, UIController)
-
-	self._connections = {} -- mọi kết nối được gom lại để ngắt sạch khi Destroy
-	self._tabs = {}
-	self._tabOrder = {}
-	self._controls = {}
-	self._layoutCounter = 0
-	self._collapsed = false
-	self._destroyed = false
-	self._capture = nil -- thao tác con trỏ đang giữ (kéo cửa sổ / kéo slider)
-	self._activeTab = nil
-	self._sizeTween = nil
-
-	for _, name in ipairs(SIGNAL_NAMES) do
-		self[name] = Signal.new()
-	end
-
-	local size = options.Size or DEFAULT_SIZE
-	self._expandedSize = Vector2.new(size.X, size.Y)
-
-	self:_buildGui(options)
-	self:_bindGlobalInput(options)
-
-	for _, tabName in ipairs(options.Tabs or DEFAULT_TABS) do
-		self:AddTab(tabName)
-	end
-
-	return self
-end
-
-----------------------------------------------------------------------
--- NỘI BỘ: DỰNG KHUNG GIAO DIỆN
-----------------------------------------------------------------------
-function UIController:_connect(signal, callback)
-	local connection = signal:Connect(callback)
-	table.insert(self._connections, connection)
-	return connection
-end
-
-function UIController:_nextOrder()
-	self._layoutCounter += 1
-	return self._layoutCounter
-end
-
-function UIController:_buildGui(options)
-	local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
-	local guiName = options.Name or "HpTeamProMenu"
-
-	-- Xoá menu cũ (nếu script chạy lại) để tránh trùng lặp.
-	local old = playerGui:FindFirstChild(guiName)
-	if old then
-		old:Destroy()
-	end
-
-	-- ResetOnSpawn = false: menu không bị tạo lại mỗi khi nhân vật hồi sinh.
-	local screenGui = create("ScreenGui", {
-		Name = guiName,
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		DisplayOrder = options.DisplayOrder or 100,
-		IgnoreGuiInset = true,
-	})
-	self._screenGui = screenGui
-
-	local startPosition = options.Position or Vector2.new(24, 80)
-	local size = self._expandedSize
-
-	-- Root: khung vị trí/kích thước, chứa bóng đổ + cửa sổ.
-	local root = create("Frame", {
-		Name = "Root",
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(startPosition.X, startPosition.Y),
-		Size = UDim2.fromOffset(size.X, size.Y),
-	}, screenGui)
-	self._root = root
-
-	-- Bóng đổ nhẹ (frame đen mờ lệch xuống dưới).
-	local shadow = create("Frame", {
-		Name = "Shadow",
-		BackgroundColor3 = Color3.new(0, 0, 0),
-		BackgroundTransparency = 0.6,
-		BorderSizePixel = 0,
-		Position = UDim2.fromOffset(-2, 2),
-		Size = UDim2.new(1, 4, 1, 4),
-		ZIndex = 1,
-	}, root)
-	addCorner(shadow, 10)
-
-	local window = create("Frame", {
-		Name = "Window",
-		BackgroundColor3 = THEME.Background,
-		BorderSizePixel = 0,
-		Size = UDim2.fromScale(1, 1),
-		ClipsDescendants = true,
-		ZIndex = 2,
-	}, root)
-	addCorner(window, 8)
-	addStroke(window, THEME.Accent, 1.5, 0.1)
-
-	-- ===== Thanh tiêu đề =====
-	local titleBar = create("Frame", {
-		Name = "TitleBar",
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, TITLE_HEIGHT),
-	}, window)
-
-	-- Vùng kéo thả (không phủ lên 2 nút bên phải để nút vẫn bấm được).
-	local dragArea = newButton({
-		Name = "DragArea",
-		Size = UDim2.new(1, -64, 1, 0),
-	}, titleBar)
-	newLabel({
-		Name = "Title",
-		Text = options.Title or "Hp Team Pro V1",
-		Font = Enum.Font.GothamBold,
-		TextSize = 14,
-		TextColor3 = THEME.Accent,
-		Position = UDim2.fromOffset(10, 0),
-		Size = UDim2.new(1, -10, 1, 0),
-		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, dragArea)
-
-	local collapseButton = newButton({
-		Name = "CollapseButton",
-		Text = "-",
-		TextSize = 18,
-		TextColor3 = THEME.Accent,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.Panel,
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -34, 0.5, 0),
-		Size = UDim2.fromOffset(24, 22),
-	}, titleBar)
-	addCorner(collapseButton, 5)
-	self._collapseButton = collapseButton
-
-	local closeButton = newButton({
-		Name = "CloseButton",
-		Text = "X",
-		TextSize = 13,
-		TextColor3 = THEME.OffText,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.Panel,
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -6, 0.5, 0),
-		Size = UDim2.fromOffset(24, 22),
-	}, titleBar)
-	addCorner(closeButton, 5)
-
-	create("Frame", {
-		Name = "Separator",
-		BackgroundColor3 = THEME.Accent,
-		BackgroundTransparency = 0.7,
-		BorderSizePixel = 0,
-		Position = UDim2.fromOffset(0, TITLE_HEIGHT),
-		Size = UDim2.new(1, 0, 0, 1),
-	}, window)
-
-	-- ===== Thân menu: thanh tab + các trang =====
-	local body = create("Frame", {
-		Name = "Body",
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(0, TITLE_HEIGHT + 1),
-		Size = UDim2.new(1, 0, 1, -(TITLE_HEIGHT + 1)),
-		ClipsDescendants = true,
-	}, window)
-	self._body = body
-
-	local tabBar = create("Frame", {
-		Name = "TabBar",
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(6, 5),
-		Size = UDim2.new(1, -12, 0, TAB_HEIGHT),
-	}, body)
-	self._tabBar = tabBar
-	self._tabGrid = create("UIGridLayout", {
-		SortOrder = Enum.SortOrder.LayoutOrder,
-		CellPadding = UDim2.fromOffset(4, 0),
-		CellSize = UDim2.new(1, 0, 1, 0),
-	}, tabBar)
-
-	self._pages = create("Frame", {
-		Name = "Pages",
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(0, TAB_HEIGHT + 10),
-		Size = UDim2.new(1, 0, 1, -(TAB_HEIGHT + 10)),
-	}, body)
-
-	-- ===== Sự kiện thanh tiêu đề =====
-	-- Kéo thả cửa sổ (chuột + cảm ứng).
-	self:_connect(dragArea.InputBegan, function(input)
-		local inputType = input.UserInputType
-		if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then
-			return
+local function itemStep()
+	local folder = Workspace:FindFirstChild("Item")
+	local want = {}
+	if folder then
+		local list = {}
+		collectItems(folder, list, 0)
+		for _, obj in list do
+			if obj.Parent then
+				local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
+				local hum = obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid")
+				if Util.dist(pos) <= Cfg.ScanRange and not (hum and hum.Health <= 0) then
+					want[obj] = true
+					if not Esp.items[obj] then
+						local h = Instance.new("Highlight")
+						h.FillColor, h.OutlineColor = Color3.fromRGB(80, 255, 120), Color3.new(1, 1, 1)
+						h.FillTransparency, h.DepthMode = 0.6, Enum.HighlightDepthMode.AlwaysOnTop
+						h.Adornee, h.Parent = obj, hlFolder
+						Esp.items[obj] = h
+					end
+				end
+			end
 		end
-		local startPointer = Vector2.new(input.Position.X, input.Position.Y)
-		local startPosition2 = root.AbsolutePosition
-		self:_beginCapture(input, function(position)
-			local delta = Vector2.new(position.X, position.Y) - startPointer
-			self:_applyPosition(startPosition2 + delta)
-		end)
-	end)
-
-	self:_connect(collapseButton.Activated, function()
-		self:SetCollapsed(not self._collapsed)
-	end)
-
-	self:_connect(closeButton.Activated, function()
-		self.Closed:Fire()
-		self:Destroy()
-	end)
-
-	-- Nếu kích thước màn hình đổi (xoay máy...), giữ menu trong màn hình.
-	self:_connect(screenGui:GetPropertyChangedSignal("AbsoluteSize"), function()
-		self:_applyPosition(root.AbsolutePosition)
-	end)
-
-	screenGui.Parent = playerGui
+	end
+	for obj, h in pairs(Esp.items) do
+		if not want[obj] or not obj.Parent then h:Destroy() Esp.items[obj] = nil end
+	end
 end
 
-----------------------------------------------------------------------
--- NỘI BỘ: VỊ TRÍ & CON TRỎ
-----------------------------------------------------------------------
--- Giới hạn vị trí để thanh tiêu đề luôn còn nằm trong màn hình.
-function UIController:_clampPosition(position)
-	local viewport = self._screenGui.AbsoluteSize
-	local size = self._root.AbsoluteSize
-	local minVisible = 60
-	local x = math.clamp(position.X, -(size.X - minVisible), math.max(viewport.X - minVisible, 0))
-	local y = math.clamp(position.Y, 0, math.max(viewport.Y - TITLE_HEIGHT, 0))
-	return Vector2.new(x, y)
+local function espStep(dt)
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+	ensureEspLayer()
+	if F.EspLine or F.EspBox or F.EspName or F.EspDistance or F.EspHologram then
+		espTargetStep(cam)
+	else
+		for m in pairs(Esp.entries) do dropEntry(m) end
+	end
+	if F.EspWorkspace then
+		Esp.itemAcc += dt
+		if Esp.itemAcc >= 0.4 then Esp.itemAcc = 0 itemStep() end
+	else
+		for obj, h in pairs(Esp.items) do h:Destroy() Esp.items[obj] = nil end
+	end
 end
-
-function UIController:_applyPosition(position)
-	local clamped = self:_clampPosition(position)
-	self._root.Position = UDim2.fromOffset(clamped.X, clamped.Y)
-end
-
--- Giữ "con trỏ" cho một thao tác kéo (cửa sổ hoặc slider) cho tới khi nhả.
-function UIController:_beginCapture(input, onMove, onEnd)
-	self:_endCapture()
-	local capture = { Input = input, OnMove = onMove, OnEnd = onEnd }
-	capture.Connection = input.Changed:Connect(function()
-		if input.UserInputState == Enum.UserInputState.End and self._capture == capture then
-			self:_endCapture()
+local ESP_FLAGS = { "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram", "EspWorkspace" }
+for _, f in ESP_FLAGS do
+	State.listen(f, function()
+		local any = false
+		for _, k in ESP_FLAGS do any = any or F[k] end
+		if any then
+			ensureEspLayer()
+			Conn.set("esp", RunService.RenderStepped, espStep)
+		else
+			Conn.drop("esp")
+			Esp.clearAll() -- dọn sạch mọi thứ khi tắt hết
 		end
 	end)
-	self._capture = capture
 end
 
-function UIController:_endCapture()
-	local capture = self._capture
-	if not capture then
+--------------------------------------------------------------------------------
+-- MovementAndWorld
+--------------------------------------------------------------------------------
+local Move = { yaw = 0, groundY = 0, noclipReasons = {}, noclipOrig = setmetatable({}, { __mode = "k" }) }
+
+-- NoClip (đếm tham chiếu: Fly Down cũng cần noclip để chui xuống đất)
+local function noclipStep()
+	local c = LP.Character
+	if not c then return end
+	for _, p in c:GetDescendants() do
+		if p:IsA("BasePart") then
+			if Move.noclipOrig[p] == nil then Move.noclipOrig[p] = p.CanCollide end
+			p.CanCollide = false
+		end
+	end
+end
+local function refreshNoclip()
+	if next(Move.noclipReasons) then
+		Conn.set("noclip", RunService.Stepped, noclipStep)
+	else
+		Conn.drop("noclip")
+		for p, orig in pairs(Move.noclipOrig) do
+			if p.Parent then p.CanCollide = orig end -- khôi phục chính xác trạng thái ban đầu
+			Move.noclipOrig[p] = nil
+		end
+	end
+end
+function Move.setNoclip(reason, on)
+	Move.noclipReasons[reason] = on or nil
+	refreshNoclip()
+end
+State.listen("NoClip", function(on) Move.setNoclip("user", on) end)
+
+-- Fly Air / Fly Dron / Fly Down dùng chung 1 vòng Heartbeat
+local rayP = RaycastParams.new()
+rayP.FilterType = Enum.RaycastFilterType.Exclude
+local function flyStep(dt)
+	local hum, hrp = Util.hum(), Util.hrp()
+	if not (hum and hrp) then return end
+	hum.PlatformStand = true -- tránh Humanoid tự đứng/rơi làm lệch vị trí
+	local move, v = hum.MoveDirection, RT.Vertical
+
+	if F.FlyAir then
+		-- Trọng lực vẫn kéo xuống 1 chút mỗi bước vật lý, nên không chỉ đặt vận tốc:
+		-- ta giữ độ cao mục tiêu Move.airY, chỉ đổi khi bấm lên/xuống, và ghim lại Y mỗi khung hình.
+		local pos0 = hrp.Position
+		if not Move.airY or Move.airHrp ~= hrp then Move.airY, Move.airHrp = pos0.Y, hrp end
+		Move.airY += v * Cfg.FlySpeed * dt
+		local look = move.Magnitude > 0.1 and Vector3.new(move.X, 0, move.Z) or nil
+		local base = look and CFrame.lookAt(Vector3.new(pos0.X, Move.airY, pos0.Z), Vector3.new(pos0.X + look.X, Move.airY, pos0.Z + look.Z))
+			or (hrp.CFrame.Rotation + Vector3.new(pos0.X, Move.airY, pos0.Z))
+		hrp.CFrame = base
+		-- Y = 0 hoàn toàn: đứng yên giữa trời, không rơi / không trôi
+		hrp.AssemblyLinearVelocity = Vector3.new(move.X * Cfg.FlySpeed, 0, move.Z * Cfg.FlySpeed)
+		hrp.AssemblyAngularVelocity = Vector3.zero
 		return
 	end
-	self._capture = nil
-	capture.Connection:Disconnect()
-	if capture.OnEnd then
-		capture.OnEnd()
+
+	-- Dron (úp mặt, cách đất DroneHeight) / Down (ngửa mặt, chìm dưới đất FlyDownDepth)
+	local pos = hrp.Position
+	rayP.FilterDescendantsInstances = { LP.Character }
+	local originY = pos.Y + (F.FlyDown and Cfg.FlyDownDepth or 0) + 3
+	local hit = Workspace:Raycast(Vector3.new(pos.X, originY, pos.Z), Vector3.new(0, -600, 0), rayP)
+	if hit then Move.groundY = hit.Position.Y end -- không thấy đất thì giữ giá trị cũ => không rơi
+	local wantY
+	if F.FlyDron then
+		Cfg.DroneHeight = math.clamp(Cfg.DroneHeight + v * Cfg.HoverRate * dt, 1, 300)
+		wantY = Move.groundY + Cfg.DroneHeight
+	else
+		-- depth > 0: dưới đất; depth <= 0: ngang/trên mặt đất (▲ giảm depth để đi lên, không bị chặn ở mặt đất)
+		Cfg.FlyDownDepth = math.clamp(Cfg.FlyDownDepth - v * math.max(Cfg.HoverRate, Cfg.FlySpeed * 0.5) * dt, -150, 150)
+		wantY = Move.groundY - Cfg.FlyDownDepth
 	end
+	if move.Magnitude > 0.1 then Move.yaw = math.atan2(-move.X, -move.Z) end
+	local newPos = Vector3.new(
+		pos.X + move.X * Cfg.FlySpeed * dt,
+		pos.Y + (wantY - pos.Y) * math.min(1, dt * 10),
+		pos.Z + move.Z * Cfg.FlySpeed * dt)
+	local pitch = F.FlyDron and -math.pi / 2 or math.pi / 2
+	hrp.CFrame = CFrame.new(newPos) * CFrame.Angles(0, Move.yaw, 0) * CFrame.Angles(pitch, 0, 0)
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	-- Camera không bị chỉnh => giữ nguyên góc camera gốc
 end
 
--- Chỉ 1 kết nối toàn cục cho mọi thao tác kéo -> không phát sinh rò rỉ kết nối.
-function UIController:_bindGlobalInput(options)
-	self:_connect(UserInputService.InputChanged, function(input)
-		local capture = self._capture
-		if not capture then
-			return
+local function refreshFly()
+	Move.airY = nil -- lấy lại độ cao hiện tại mỗi lần bật/tắt chế độ bay
+	if F.FlyAir or F.FlyDron or F.FlyDown then
+		local cam = Workspace.CurrentCamera
+		if cam then local l = cam.CFrame.LookVector Move.yaw = math.atan2(-l.X, -l.Z) end
+		State.save("PlatformStand", function() local h = Util.hum() return h and h.PlatformStand or false end)
+		Conn.set("fly", RunService.Heartbeat, flyStep)
+	else
+		Conn.drop("fly")
+		RT.Vertical = 0
+		local h, r = Util.hum(), Util.hrp()
+		if h then h.PlatformStand = State.take("PlatformStand") or false end
+		if r then -- đứng thẳng lại
+			r.CFrame = CFrame.new(r.Position) * CFrame.Angles(0, Move.yaw, 0)
+			r.AssemblyLinearVelocity = Vector3.zero
 		end
-		local isMouseMove = input.UserInputType == Enum.UserInputType.MouseMovement
-		if isMouseMove or input == capture.Input then
-			capture.OnMove(input.Position)
-		end
+	end
+end
+for _, f in { "FlyAir", "FlyDron", "FlyDown" } do
+	State.listen(f, function()
+		Move.setNoclip("FlyDown", F.FlyDown)
+		refreshFly()
 	end)
+end
 
-	self:_connect(UserInputService.InputEnded, function(input)
-		local capture = self._capture
-		if not capture then
-			return
-		end
-		local mouseReleased = input.UserInputType == Enum.UserInputType.MouseButton1
-			and capture.Input.UserInputType == Enum.UserInputType.MouseButton1
-		if input == capture.Input or mouseReleased then
-			self:_endCapture()
-		end
-	end)
+-- Speed
+local spd = {}
+State.listen("Speed", function(on)
+	if on then
+		Conn.set("speed", RunService.Heartbeat, function()
+			local h = Util.hum()
+			if not h then return end
+			if spd.hum ~= h then spd.hum, spd.orig = h, h.WalkSpeed end -- snapshot theo từng nhân vật
+			h.WalkSpeed = Cfg.WalkSpeed
+		end)
+	else
+		Conn.drop("speed")
+		if spd.hum and spd.hum.Parent then spd.hum.WalkSpeed = spd.orig or 16 end
+		spd.hum = nil
+	end
+end)
 
-	-- Phím tắt ẩn/hiện (PC). Bỏ qua khi đang gõ chữ.
-	if options.ToggleKey then
-		self:_connect(UserInputService.InputBegan, function(input, processed)
-			if not processed and input.KeyCode == options.ToggleKey then
-				self:SetVisible(not self._screenGui.Enabled)
+-- Jumping Air
+local lastJump = 0
+State.listen("JumpAir", function(on)
+	if on then
+		Conn.set("jump", UIS.JumpRequest, function()
+			local h = Util.hum()
+			if h and os.clock() - lastJump > 0.15 then
+				lastJump = os.clock()
+				h.PlatformStand = false
+				h:ChangeState(Enum.HumanoidStateType.Jumping) -- không khóa trạng thái => vẫn di chuyển được
 			end
 		end)
+	else
+		Conn.drop("jump")
+	end
+end)
+
+-- Night Vision
+State.listen("NightVision", function(on)
+	if on then
+		State.save("Night", function()
+			local s = {}
+			for _, k in { "Brightness", "ClockTime", "FogStart", "FogEnd", "GlobalShadows", "Ambient", "OutdoorAmbient", "ExposureCompensation" } do s[k] = Lighting[k] end
+			s.atmo = {}
+			for _, a in Lighting:GetChildren() do
+				if a:IsA("Atmosphere") then s.atmo[a] = { a.Density, a.Haze } end
+			end
+			return s
+		end)
+		Lighting.Brightness, Lighting.ClockTime, Lighting.FogStart, Lighting.FogEnd = 2, 14, 1e5, 1e6
+		Lighting.GlobalShadows, Lighting.Ambient, Lighting.OutdoorAmbient = false, Color3.new(1, 1, 1), Color3.new(1, 1, 1)
+		for _, a in Lighting:GetChildren() do
+			if a:IsA("Atmosphere") then a.Density, a.Haze = 0, 0 end
+		end
+	else
+		local s = State.take("Night")
+		if s then
+			for k, v in pairs(s) do if k ~= "atmo" then Lighting[k] = v end end
+			for a, vals in pairs(s.atmo) do if a.Parent then a.Density, a.Haze = vals[1], vals[2] end end
+		end
+	end
+end)
+
+-- Fix Lag (disable có snapshot, không xóa => khôi phục được)
+local lagOrig = setmetatable({}, { __mode = "k" })
+local LAG_CLASSES = { "ParticleEmitter", "Trail", "Beam", "Smoke", "Fire", "Sparkles", "BloomEffect", "BlurEffect", "SunRaysEffect", "DepthOfFieldEffect" }
+local lagToken = 0
+local function lagHandle(inst)
+	for _, cls in LAG_CLASSES do
+		if inst:IsA(cls) then
+			if lagOrig[inst] == nil then lagOrig[inst] = inst.Enabled end
+			inst.Enabled = false
+			return
+		end
 	end
 end
-
-----------------------------------------------------------------------
--- CỬA SỔ: THU GỌN / HIỆN / ẨN
-----------------------------------------------------------------------
--- Thu gọn về thanh tiêu đề, giữ nguyên vị trí hiện tại (Root không đổi Position).
-function UIController:SetCollapsed(collapsed)
-	collapsed = collapsed == true
-	if self._destroyed or collapsed == self._collapsed then
-		return
-	end
-	self._collapsed = collapsed
-	self._collapseButton.Text = collapsed and "+" or "-"
-
-	if self._sizeTween then
-		self._sizeTween:Cancel()
-	end
-
-	local width = self._expandedSize.X
-	if collapsed then
-		self._sizeTween = tween(self._root, { Size = UDim2.fromOffset(width, TITLE_HEIGHT + 1) }, 0.2)
-		task.delay(0.2, function()
-			-- Chỉ ẩn thân menu nếu trong lúc chờ người dùng chưa mở lại.
-			if self._collapsed and not self._destroyed then
-				self._body.Visible = false
+State.listen("FixLag", function(on)
+	lagToken += 1
+	local token = lagToken
+	if on then
+		State.save("Lag", function()
+			local ok, q = pcall(function() return settings().Rendering.QualityLevel end)
+			return { shadows = Lighting.GlobalShadows, quality = ok and q or nil }
+		end)
+		Lighting.GlobalShadows = false
+		pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+		for _, c in Lighting:GetChildren() do lagHandle(c) end
+		Conn.set("lagAdded", Workspace.DescendantAdded, lagHandle)
+		task.spawn(function() -- quét theo lô, có yield để không đơ khung hình
+			local n = 0
+			for _, d in Workspace:GetDescendants() do
+				if token ~= lagToken then return end
+				lagHandle(d)
+				n += 1
+				if n % 400 == 0 then task.wait() end
 			end
 		end)
 	else
-		self._body.Visible = true
-		self._sizeTween = tween(self._root, { Size = UDim2.fromOffset(width, self._expandedSize.Y) }, 0.2)
-	end
-
-	self.CollapsedChanged:Fire(collapsed)
-end
-
-function UIController:IsCollapsed()
-	return self._collapsed
-end
-
-function UIController:SetVisible(visible)
-	if not self._destroyed then
-		self._screenGui.Enabled = visible == true
-	end
-end
-
-function UIController:IsVisible()
-	return not self._destroyed and self._screenGui.Enabled
-end
-
-----------------------------------------------------------------------
--- TAB
-----------------------------------------------------------------------
--- Cập nhật độ rộng ô tab để N tab luôn chia đều chiều ngang.
-function UIController:_updateTabLayout()
-	local count = math.max(#self._tabOrder, 1)
-	local gapShare = math.ceil(4 * (count - 1) / count)
-	self._tabGrid.CellSize = UDim2.new(1 / count, -gapShare, 1, 0)
-end
-
-function UIController:_styleTab(tab, active, instant)
-	applyProps(tab.Button, {
-		BackgroundColor3 = active and THEME.AccentDim or THEME.Panel,
-		TextColor3 = active and THEME.Accent or THEME.TextMuted,
-	}, instant)
-	applyProps(tab.Indicator, { BackgroundTransparency = active and 0 or 1 }, instant)
-end
-
-function UIController:AddTab(name)
-	assert(type(name) == "string" and name ~= "", "[UIController] Tên tab phải là chuỗi không rỗng")
-	if self._tabs[name] then
-		return self._tabs[name]
-	end
-
-	local tabButton = newButton({
-		Name = "Tab_" .. name,
-		Text = name,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.Panel,
-		TextColor3 = THEME.TextMuted,
-		LayoutOrder = #self._tabOrder + 1,
-	}, self._tabBar)
-	addCorner(tabButton, 6)
-
-	local indicator = create("Frame", {
-		Name = "Indicator",
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, 0),
-		Size = UDim2.new(0.6, 0, 0, 2),
-		BackgroundColor3 = THEME.Accent,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-	}, tabButton)
-	addCorner(indicator, 1)
-
-	-- CanvasGroup cho phép làm mờ (fade) cả trang khi chuyển tab.
-	local page = create("CanvasGroup", {
-		Name = "Page_" .. name,
-		BackgroundTransparency = 1,
-		Size = UDim2.fromScale(1, 1),
-		Visible = false,
-	}, self._pages)
-
-	-- ScrollingFrame tự căn CanvasSize theo nội dung (AutomaticCanvasSize).
-	local scroll = create("ScrollingFrame", {
-		Name = "Scroll",
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Size = UDim2.fromScale(1, 1),
-		CanvasSize = UDim2.new(),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-		ScrollBarThickness = 4,
-		ScrollBarImageColor3 = THEME.Accent,
-		ScrollBarImageTransparency = 0.3,
-	}, page)
-	create("UIListLayout", {
-		SortOrder = Enum.SortOrder.LayoutOrder,
-		Padding = UDim.new(0, 6),
-	}, scroll)
-	create("UIPadding", {
-		PaddingLeft = UDim.new(0, 6),
-		PaddingRight = UDim.new(0, 10),
-		PaddingTop = UDim.new(0, 2),
-		PaddingBottom = UDim.new(0, 8),
-	}, scroll)
-
-	local tab = { Name = name, Button = tabButton, Indicator = indicator, Page = page, Scroll = scroll }
-	self._tabs[name] = tab
-	table.insert(self._tabOrder, name)
-	self:_updateTabLayout()
-	self:_styleTab(tab, false, true)
-
-	self:_connect(tabButton.Activated, function()
-		self:SelectTab(name)
-	end)
-
-	if not self._activeTab then
-		self:SelectTab(name, true)
-	end
-	return tab
-end
-
-function UIController:SelectTab(name, instant)
-	local tab = self._tabs[name]
-	if self._destroyed or not tab or tab == self._activeTab then
-		return
-	end
-
-	local previous = self._activeTab
-	if previous then
-		previous.Page.Visible = false
-		self:_styleTab(previous, false, instant == true)
-	end
-
-	self._activeTab = tab
-	tab.Page.Visible = true
-	self:_styleTab(tab, true, instant == true)
-
-	if instant then
-		tab.Page.GroupTransparency = 0
-	else
-		tab.Page.GroupTransparency = 1
-		tween(tab.Page, { GroupTransparency = 0 }, 0.2)
-	end
-
-	self.TabChanged:Fire(name)
-end
-
-function UIController:GetActiveTab()
-	return self._activeTab and self._activeTab.Name or nil
-end
-
-function UIController:_requireTab(name)
-	local tab = self._tabs[name]
-	if not tab then
-		error(string.format("[UIController] Tab '%s' không tồn tại", tostring(name)), 3)
-	end
-	return tab
-end
-
-function UIController:_reserveId(id)
-	assert(type(id) == "string" and id ~= "", "[UIController] Control cần có Id dạng chuỗi")
-	assert(self._controls[id] == nil, string.format("[UIController] Id '%s' đã tồn tại", id))
-	return id
-end
-
-----------------------------------------------------------------------
--- ĐIỀU KHIỂN: SECTION / BUTTON
-----------------------------------------------------------------------
-function UIController:AddSection(tabName, text)
-	local tab = self:_requireTab(tabName)
-	return newLabel({
-		Name = "Section",
-		Text = string.upper(text or ""),
-		Font = Enum.Font.GothamBold,
-		TextSize = 11,
-		TextColor3 = THEME.Accent,
-		Size = UDim2.new(1, 0, 0, 18),
-		LayoutOrder = self:_nextOrder(),
-	}, tab.Scroll)
-end
-
-function UIController:AddButton(tabName, options)
-	local tab = self:_requireTab(tabName)
-	local row = newButton({
-		Name = "Button_" .. tostring(options.Id or options.Text or "Button"),
-		Text = options.Text or "Button",
-		TextColor3 = THEME.Accent,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.AccentDim,
-		Size = UDim2.new(1, 0, 0, 30),
-		LayoutOrder = self:_nextOrder(),
-	}, tab.Scroll)
-	addCorner(row, 6)
-	addStroke(row, THEME.Accent, 1, 0.6)
-
-	self:_connect(row.Activated, function()
-		if options.Callback then
-			task.spawn(options.Callback)
+		Conn.drop("lagAdded")
+		for inst, prev in pairs(lagOrig) do
+			if inst.Parent then inst.Enabled = prev end
+			lagOrig[inst] = nil
 		end
-	end)
+		local s = State.take("Lag")
+		if s then
+			Lighting.GlobalShadows = s.shadows
+			if s.quality then pcall(function() settings().Rendering.QualityLevel = s.quality end) end
+		end
+	end
+end)
+
+-- Hồi sinh: bỏ snapshot nhân vật cũ, noclip áp lại ở nhân vật mới
+LP.CharacterAdded:Connect(function()
+	table.clear(Move.noclipOrig)
+	RT.Vertical = 0
+end)
+
+--------------------------------------------------------------------------------
+-- UIController
+--------------------------------------------------------------------------------
+local UI = { refreshers = {} }
+local C = {
+	bg = Color3.fromRGB(22, 22, 28), bar = Color3.fromRGB(34, 34, 44), row = Color3.fromRGB(32, 32, 40),
+	on = Color3.fromRGB(60, 180, 100), off = Color3.fromRGB(150, 60, 60), text = Color3.fromRGB(235, 235, 240),
+	accent = Color3.fromRGB(90, 120, 255),
+}
+local function new(class, props, parent)
+	local o = Instance.new(class)
+	for k, v in pairs(props) do o[k] = v end
+	o.Parent = parent
+	return o
+end
+local function round(o, r) new("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o) end
+
+local gui = new("ScreenGui", { Name = "DebugConsole", ResetOnSpawn = false, DisplayOrder = 100, IgnoreGuiInset = true }, LP:WaitForChild("PlayerGui"))
+local main = new("Frame", { Size = UDim2.fromOffset(300, 410), Position = UDim2.fromOffset(20, 80), BackgroundColor3 = C.bg, BorderSizePixel = 0 }, gui)
+round(main, 10)
+local top = new("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.bar, BorderSizePixel = 0 }, main)
+round(top, 10)
+new("TextLabel", { Size = UDim2.new(1, -80, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = "Debug Console", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left }, top)
+local btnCollapse = new("TextButton", { Size = UDim2.fromOffset(28, 24), Position = UDim2.new(1, -66, 0, 4), BackgroundColor3 = C.row, Text = "—", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14 }, top)
+local btnClose = new("TextButton", { Size = UDim2.fromOffset(28, 24), Position = UDim2.new(1, -34, 0, 4), BackgroundColor3 = C.off, Text = "X", TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 14 }, top)
+round(btnCollapse, 5) round(btnClose, 5)
+local content = new("Frame", { Size = UDim2.new(1, 0, 1, -32), Position = UDim2.fromOffset(0, 32), BackgroundTransparency = 1 }, main)
+
+-- Kéo thả menu bằng thanh tiêu đề (chuột + cảm ứng)
+top.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		local startPos, origin = input.Position, main.Position
+		Conn.set("uiDrag", UIS.InputChanged, function(i)
+			if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+				local d = i.Position - startPos
+				main.Position = UDim2.new(origin.X.Scale, origin.X.Offset + d.X, origin.Y.Scale, origin.Y.Offset + d.Y)
+			end
+		end)
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then Conn.drop("uiDrag") end
+		end)
+	end
+end)
+
+local collapsed = false
+btnCollapse.MouseButton1Click:Connect(function()
+	collapsed = not collapsed
+	content.Visible = not collapsed
+	main.Size = collapsed and UDim2.fromOffset(300, 32) or UDim2.fromOffset(300, 410)
+end)
+
+-- Tab
+local tabBar = new("Frame", { Size = UDim2.new(1, -16, 0, 28), Position = UDim2.fromOffset(8, 4), BackgroundTransparency = 1 }, content)
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6) }, tabBar)
+local pages, tabBtns = {}, {}
+local function selectTab(name)
+	for n, p in pairs(pages) do p.Visible = (n == name) end
+	for n, b in pairs(tabBtns) do b.BackgroundColor3 = (n == name) and C.accent or C.row end
+end
+for _, name in { "Main", "Esp", "Khác" } do
+	local b = new("TextButton", { Size = UDim2.new(1 / 3, -4, 1, 0), BackgroundColor3 = C.row, Text = name, TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 13 }, tabBar)
+	round(b, 6)
+	tabBtns[name] = b
+	local p = new("ScrollingFrame", {
+		Size = UDim2.new(1, -16, 1, -42), Position = UDim2.fromOffset(8, 38), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = false,
+	}, content)
+	new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, p)
+	pages[name] = p
+	b.MouseButton1Click:Connect(function() selectTab(name) end)
+end
+
+-- Hàng chức năng + nút ▲▼ để sắp xếp lại thứ tự tự do
+local function reorder(page, row, dir)
+	local rows = {}
+	for _, r in page:GetChildren() do if r:IsA("Frame") then rows[#rows + 1] = r end end
+	table.sort(rows, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+	local i = table.find(rows, row)
+	local j = i and i + dir
+	if i and rows[j] then row.LayoutOrder, rows[j].LayoutOrder = rows[j].LayoutOrder, row.LayoutOrder end
+end
+local orderCounter = 0
+local function addRow(page, label)
+	orderCounter += 10
+	local row = new("Frame", { Size = UDim2.new(1, -6, 0, 32), BackgroundColor3 = C.row, LayoutOrder = orderCounter, BorderSizePixel = 0 }, page)
+	round(row)
+	new("TextLabel", { Size = UDim2.new(1, -110, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, Text = label, TextColor3 = C.text, Font = Enum.Font.Gotham, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left }, row)
+	for k, dir in ipairs({ -1, 1 }) do
+		local b = new("TextButton", { Size = UDim2.fromOffset(18, 24), Position = UDim2.new(1, -44 + (k - 1) * 20, 0, 4), BackgroundColor3 = C.bar, Text = dir < 0 and "▲" or "▼", TextColor3 = C.text, TextSize = 9, Font = Enum.Font.GothamBold }, row)
+		round(b, 4)
+		b.MouseButton1Click:Connect(function() reorder(page, row, dir) end)
+	end
 	return row
 end
-
-----------------------------------------------------------------------
--- ĐIỀU KHIỂN: TOGGLE ON/OFF
-----------------------------------------------------------------------
-function UIController:AddToggle(tabName, options)
-	assert(type(options) == "table", "[UIController] AddToggle cần bảng options")
-	local tab = self:_requireTab(tabName)
-	local id = self:_reserveId(options.Id)
-	local state = options.Default == true
-
-	-- Cả hàng là một nút bấm; huy hiệu bên phải hiển thị ON / OFF.
-	local row = newButton({
-		Name = "Toggle_" .. id,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.Panel,
-		Size = UDim2.new(1, 0, 0, 30),
-		LayoutOrder = self:_nextOrder(),
-	}, tab.Scroll)
-	addCorner(row, 6)
-	local rowStroke = addStroke(row, THEME.PanelStroke, 1, 0)
-
-	newLabel({
-		Name = "Label",
-		Text = options.Text or id,
-		Position = UDim2.fromOffset(10, 0),
-		Size = UDim2.new(1, -72, 1, 0),
-		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, row)
-
-	local badge = create("Frame", {
-		Name = "Badge",
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -8, 0.5, 0),
-		Size = UDim2.fromOffset(46, 20),
-		BorderSizePixel = 0,
-	}, row)
-	addCorner(badge, 10)
-	local badgeText = newLabel({
-		Name = "State",
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Center,
-		Size = UDim2.fromScale(1, 1),
-	}, badge)
-
-	local handle = { Id = id, Type = "Toggle", Instance = row, Changed = Signal.new() }
-
-	local function render(instant)
-		badgeText.Text = state and "ON" or "OFF"
-		applyProps(badge, { BackgroundColor3 = state and THEME.Accent or THEME.OffBadge }, instant)
-		applyProps(badgeText, { TextColor3 = state and THEME.Background or THEME.OffText }, instant)
-		applyProps(rowStroke, { Color = state and THEME.Accent or THEME.PanelStroke }, instant)
-	end
-
-	local function setState(newState, fireEvent)
-		newState = newState == true
-		if newState == state then
-			return
-		end
-		state = newState
-		render(false)
-		if fireEvent then
-			if options.Callback then
-				task.spawn(options.Callback, state)
-			end
-			handle.Changed:Fire(state)
-			self.ToggleChanged:Fire(id, state)
-		end
-	end
-
-	function handle:Get()
-		return state
-	end
-
-	-- Cập nhật từ bên ngoài: mặc định KHÔNG bắn callback (tránh vòng lặp). Truyền fireEvent = true nếu muốn.
-	function handle:Set(newState, fireEvent)
-		setState(newState, fireEvent == true)
-	end
-
-	render(true)
-	self:_connect(row.Activated, function()
-		setState(not state, true)
+local function toggleRow(tab, label, flag)
+	local row = addRow(pages[tab], label)
+	local btn = new("TextButton", { Size = UDim2.fromOffset(50, 24), Position = UDim2.new(1, -98, 0, 4), Text = "OFF", TextColor3 = C.text, BackgroundColor3 = C.off, Font = Enum.Font.GothamBold, TextSize = 12 }, row)
+	round(btn, 5)
+	local function paint(on) btn.Text, btn.BackgroundColor3 = on and "ON" or "OFF", on and C.on or C.off end
+	State.listen(flag, paint) -- giữ UI đồng bộ cả khi bị tắt do loại trừ lẫn nhau
+	btn.MouseButton1Click:Connect(function() State.set(flag, not F[flag]) end)
+end
+local function numberRow(tab, label, key, min, max)
+	local row = addRow(pages[tab], label)
+	local box = new("TextBox", { Size = UDim2.fromOffset(50, 24), Position = UDim2.new(1, -98, 0, 4), Text = tostring(Cfg[key]), TextColor3 = C.text, BackgroundColor3 = C.bar, Font = Enum.Font.Gotham, TextSize = 12, ClearTextOnFocus = false }, row)
+	round(box, 5)
+	box.FocusLost:Connect(function()
+		local n = tonumber(box.Text)
+		if n then Cfg[key] = math.clamp(n, min, max) end -- chỉ nhận số hợp lệ
+		box.Text = tostring(math.floor(Cfg[key] * 10) / 10)
 	end)
-
-	self._controls[id] = handle
-	return handle
+	table.insert(UI.refreshers, function() if not box:IsFocused() then box.Text = tostring(math.floor(Cfg[key] * 10) / 10) end end)
 end
 
-----------------------------------------------------------------------
--- ĐIỀU KHIỂN: SỐ (nhập trực tiếp + nút -/+ + slider)
-----------------------------------------------------------------------
-function UIController:AddNumber(tabName, options)
-	assert(type(options) == "table", "[UIController] AddNumber cần bảng options")
-	local tab = self:_requireTab(tabName)
-	local id = self:_reserveId(options.Id)
+toggleRow("Main", "Tele Dron", "TeleDron")
+numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
+toggleRow("Main", "Hitbox All Mod", "HitboxAll")
+numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
+toggleRow("Main", "All Mod Im", "AllModIm")
+toggleRow("Main", "Tele Kill", "TeleKill")
+toggleRow("Main", "Aimbot", "Aimbot")
+numberRow("Main", "  Phạm vi quét", "ScanRange", 10, 500)
 
-	local minValue = options.Min or 0
-	local maxValue = options.Max or 100
-	local step = options.Step or 1
-	assert(maxValue > minValue, "[UIController] Max phải lớn hơn Min")
-	assert(step > 0, "[UIController] Step phải > 0")
-	local decimals = options.Decimals or countDecimals(step)
+toggleRow("Esp", "Esp Line", "EspLine")
+toggleRow("Esp", "Esp Box", "EspBox")
+toggleRow("Esp", "Esp Name", "EspName")
+toggleRow("Esp", "Esp Distance", "EspDistance")
+toggleRow("Esp", "Esp Hologram", "EspHologram")
+toggleRow("Esp", "Esp Workspace", "EspWorkspace")
 
-	-- Validate: loại bỏ nil/NaN/inf, ép về [Min, Max] và làm tròn theo Step.
-	local function normalize(raw)
-		local n = tonumber(raw)
-		if n == nil or n ~= n or n == math.huge or n == -math.huge then
-			return nil
-		end
-		n = math.clamp(n, minValue, maxValue)
-		n = minValue + math.floor((n - minValue) / step + 0.5) * step
-		n = math.clamp(n, minValue, maxValue)
-		return tonumber(string.format("%." .. tostring(decimals) .. "f", n))
-	end
+toggleRow("Khác", "Fly Down", "FlyDown")
+numberRow("Khác", "  Độ sâu Fly Down", "FlyDownDepth", -150, 150)
+toggleRow("Khác", "Fly Dron", "FlyDron")
+numberRow("Khác", "  Độ cao Fly Dron", "DroneHeight", 1, 300)
+toggleRow("Khác", "No Clip", "NoClip")
+toggleRow("Khác", "Fly Air", "FlyAir")
+numberRow("Khác", "Fly Speed", "FlySpeed", 1, 500)
+toggleRow("Khác", "Speed", "Speed")
+numberRow("Khác", "  WalkSpeed", "WalkSpeed", 1, 500)
+toggleRow("Khác", "Jumping Air", "JumpAir")
+toggleRow("Khác", "Night Vision", "NightVision")
+toggleRow("Khác", "Fix Lag", "FixLag")
+selectTab("Main")
 
-	local current = normalize(options.Default) or minValue
-
-	-- ===== Dựng giao diện =====
-	local row = create("Frame", {
-		Name = "Number_" .. id,
-		BackgroundColor3 = THEME.Panel,
-		BorderSizePixel = 0,
-		Size = UDim2.new(1, 0, 0, 58),
-		LayoutOrder = self:_nextOrder(),
-	}, tab.Scroll)
-	addCorner(row, 6)
-	addStroke(row, THEME.PanelStroke, 1, 0)
-
-	newLabel({
-		Name = "Label",
-		Text = options.Text or id,
-		Position = UDim2.fromOffset(10, 5),
-		Size = UDim2.new(1, -88, 0, 20),
-		TextTruncate = Enum.TextTruncate.AtEnd,
-	}, row)
-
-	local input = create("TextBox", {
-		Name = "Input",
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -8, 0, 5),
-		Size = UDim2.fromOffset(64, 20),
-		BackgroundColor3 = THEME.Background,
-		BorderSizePixel = 0,
-		ClearTextOnFocus = false,
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		TextColor3 = THEME.Accent,
-		Text = "",
-	}, row)
-	addCorner(input, 5)
-	addStroke(input, THEME.PanelStroke, 1, 0)
-
-	local minusButton = newButton({
-		Name = "Minus",
-		Text = "-",
-		TextSize = 16,
-		TextColor3 = THEME.Accent,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.Background,
-		Position = UDim2.fromOffset(8, 32),
-		Size = UDim2.fromOffset(24, 20),
-	}, row)
-	addCorner(minusButton, 5)
-
-	local plusButton = newButton({
-		Name = "Plus",
-		Text = "+",
-		TextSize = 16,
-		TextColor3 = THEME.Accent,
-		BackgroundTransparency = 0,
-		BackgroundColor3 = THEME.Background,
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -8, 0, 32),
-		Size = UDim2.fromOffset(24, 20),
-	}, row)
-	addCorner(plusButton, 5)
-
-	-- Vùng bấm/kéo slider (cao hơn đường track để dễ chạm trên mobile).
-	local hitArea = newButton({
-		Name = "SliderHit",
-		Position = UDim2.fromOffset(40, 32),
-		Size = UDim2.new(1, -80, 0, 20),
-	}, row)
-	local track = create("Frame", {
-		Name = "Track",
-		AnchorPoint = Vector2.new(0, 0.5),
-		Position = UDim2.new(0, 7, 0.5, 0),
-		Size = UDim2.new(1, -14, 0, 6),
-		BackgroundColor3 = THEME.Track,
-		BorderSizePixel = 0,
-	}, hitArea)
-	addCorner(track, 3)
-	local fill = create("Frame", {
-		Name = "Fill",
-		BackgroundColor3 = THEME.Accent,
-		BorderSizePixel = 0,
-		Size = UDim2.fromScale(0, 1),
-	}, track)
-	addCorner(fill, 3)
-	local knob = create("Frame", {
-		Name = "Knob",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.fromScale(0, 0.5),
-		Size = UDim2.fromOffset(14, 14),
-		BackgroundColor3 = THEME.Knob,
-		BorderSizePixel = 0,
-	}, track)
-	addCorner(knob, 7)
-	addStroke(knob, THEME.Accent, 1.5, 0)
-
-	-- ===== Logic =====
-	local handle = { Id = id, Type = "Number", Instance = row, Changed = Signal.new() }
-
-	local function refresh()
-		local alpha = (current - minValue) / (maxValue - minValue)
-		fill.Size = UDim2.fromScale(alpha, 1)
-		knob.Position = UDim2.fromScale(alpha, 0.5)
-		input.Text = formatNumber(current, decimals)
-	end
-
-	-- Trả về true nếu giá trị thật sự thay đổi. Giá trị không hợp lệ -> khôi phục giá trị cũ.
-	local function setValue(raw, fireEvent)
-		local normalized = normalize(raw)
-		if normalized == nil then
-			refresh()
-			return false
-		end
-		local changed = normalized ~= current
-		current = normalized
-		refresh()
-		if changed and fireEvent then
-			if options.Callback then
-				task.spawn(options.Callback, current)
-			end
-			handle.Changed:Fire(current)
-			self.NumberChanged:Fire(id, current)
-		end
-		return changed
-	end
-
-	function handle:Get()
-		return current
-	end
-
-	function handle:Set(value, fireEvent)
-		return setValue(value, fireEvent == true)
-	end
-
-	-- Đổi giới hạn lúc chạy (vd: Max phụ thuộc tính năng khác); giá trị hiện tại tự được ép lại.
-	function handle:SetRange(newMin, newMax)
-		assert(type(newMin) == "number" and type(newMax) == "number" and newMax > newMin, "[UIController] Range không hợp lệ")
-		minValue, maxValue = newMin, newMax
-		setValue(current, true)
-		refresh()
-	end
-
-	-- Chặn ký tự lạ ngay khi gõ; kiểm tra đầy đủ khi rời ô nhập.
-	self:_connect(input:GetPropertyChangedSignal("Text"), function()
-		if input:IsFocused() then
-			local cleaned = string.gsub(input.Text, "[^%d%.%-%+,]", "")
-			if cleaned ~= input.Text then
-				input.Text = cleaned
-			end
+-- Cụm nút tăng/giảm độ cao trên màn hình (hiện khi bật Fly Air / Dron / Down)
+local pad = new("Frame", { Size = UDim2.fromOffset(60, 124), Position = UDim2.new(1, -80, 0.5, -62), BackgroundTransparency = 1, Visible = false }, gui)
+local function padBtn(text, y, val)
+	local b = new("TextButton", { Size = UDim2.fromOffset(60, 56), Position = UDim2.fromOffset(0, y), BackgroundColor3 = C.accent, BackgroundTransparency = 0.25, Text = text, TextColor3 = C.text, TextSize = 24, Font = Enum.Font.GothamBold }, pad)
+	round(b, 10)
+	b.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then RT.Vertical = val end
+	end)
+	b.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			if RT.Vertical == val then RT.Vertical = 0 end -- thả nút => dừng hẳn, không tự tăng/giảm
 		end
 	end)
-	self:_connect(input.FocusLost, function()
-		setValue(parseNumberText(input.Text), true)
-	end)
-
-	self:_connect(minusButton.Activated, function()
-		setValue(current - step, true)
-	end)
-	self:_connect(plusButton.Activated, function()
-		setValue(current + step, true)
-	end)
-
-	-- Kéo slider: tạm khoá cuộn của ScrollingFrame để vuốt ngang không bị giật cuộn dọc.
-	self:_connect(hitArea.InputBegan, function(inputObject)
-		local inputType = inputObject.UserInputType
-		if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then
-			return
-		end
-		local function updateFromPointer(position)
-			local width = math.max(track.AbsoluteSize.X, 1)
-			local alpha = math.clamp((position.X - track.AbsolutePosition.X) / width, 0, 1)
-			setValue(minValue + alpha * (maxValue - minValue), true)
-		end
-		tab.Scroll.ScrollingEnabled = false
-		updateFromPointer(inputObject.Position)
-		self:_beginCapture(inputObject, updateFromPointer, function()
-			tab.Scroll.ScrollingEnabled = true
-		end)
-	end)
-
-	refresh()
-	self._controls[id] = handle
-	return handle
 end
-
-----------------------------------------------------------------------
--- TRUY CẬP TỪ MODULE KHÁC
-----------------------------------------------------------------------
-function UIController:GetControl(id)
-	return self._controls[id]
+padBtn("▲", 0, 1)
+padBtn("▼", 68, -1)
+for _, f in { "FlyAir", "FlyDron", "FlyDown" } do
+	State.listen(f, function() pad.Visible = F.FlyAir or F.FlyDron or F.FlyDown or false end)
 end
-
-function UIController:GetValue(id)
-	local control = self._controls[id]
-	if control then
-		return control:Get()
-	end
-	return nil
-end
-
--- Cập nhật giá trị từ bên ngoài. fireEvent mặc định false.
-function UIController:SetValue(id, value, fireEvent)
-	local control = self._controls[id]
-	assert(control, string.format("[UIController] Không tìm thấy control '%s'", tostring(id)))
-	control:Set(value, fireEvent)
-end
-
--- Ảnh chụp toàn bộ trạng thái hiện tại (tiện lưu/đồng bộ cấu hình).
-function UIController:GetState()
-	local state = { Toggles = {}, Numbers = {} }
-	for id, control in pairs(self._controls) do
-		if control.Type == "Toggle" then
-			state.Toggles[id] = control:Get()
-		elseif control.Type == "Number" then
-			state.Numbers[id] = control:Get()
-		end
-	end
-	return state
-end
-
-----------------------------------------------------------------------
--- DỌN DẸP
-----------------------------------------------------------------------
-function UIController:Destroy()
-	if self._destroyed then
-		return
-	end
-	self._destroyed = true
-
-	self:_endCapture()
-	if self._sizeTween then
-		self._sizeTween:Cancel()
-	end
-
-	-- Ngắt toàn bộ kết nối (kể cả kết nối UserInputService) để không rò rỉ.
-	for _, connection in ipairs(self._connections) do
-		connection:Disconnect()
-	end
-	table.clear(self._connections)
-
-	for _, control in pairs(self._controls) do
-		control.Changed:Destroy()
-	end
-	table.clear(self._controls)
-
-	self._screenGui:Destroy()
-
-	for _, name in ipairs(SIGNAL_NAMES) do
-		self[name]:Destroy()
-	end
-end
-
---[[
-	=== VÍ DỤ SỬ DỤNG (LocalScript) ===
-	-- (UIController đã có sẵn trong file này)
-	local ui = UIController.new({ Title = "Hp Team Pro V1", ToggleKey = Enum.KeyCode.RightShift })
-
-	ui:AddSection("Main", "Tele Dron")
-	ui:AddToggle("Main", {
-		Id = "TeleDron", Text = "Tele Dron", Default = false,
-		Callback = function(on) print("Tele Dron:", on) end,
-	})
-	ui:AddNumber("Main", { Id = "TeleDronSafeHeight", Text = "Tele Dron - Khoảng cách an toàn", Min = 2, Max = 50, Step = 1, Default = 10 })
-
-	ui:AddNumber("Khác", { Id = "FlySpeed", Text = "Fly Speed", Min = 1, Max = 300, Step = 1, Default = 50 })
-	ui:AddNumber("Khác", { Id = "Speed", Text = "Speed", Min = 16, Max = 200, Step = 1, Default = 16 })
-
-	-- Lắng nghe từ module khác:
-	ui.ToggleChanged:Connect(function(id, state) end)
-	ui.NumberChanged:Connect(function(id, value) end)
-
-	-- Đọc / ghi từ bên ngoài:
-	local flySpeed = ui:GetValue("FlySpeed")
-	ui:SetValue("TeleDron", false) -- ép tắt, không bắn callback
-]]
-
-----------------------------------------------------------------------
--- KHỞI TẠO MENU (phần chạy thật)
-----------------------------------------------------------------------
-local ui = UIController.new({
-	Title = "Hp Team Pro V1",
-	Size = Vector2.new(350, 200),
-	Position = Vector2.new(24, 80),
-	ToggleKey = Enum.KeyCode.RightShift, -- PC: ẩn/hiện menu
-})
-
--- Cho script khác truy cập: _G.HpTeamProUI:GetValue("FlySpeed")
-_G.HpTeamProUI = ui
-
--- ===== TAB MAIN =====
-ui:AddSection("Main", "Tele Dron")
-ui:AddToggle("Main", {
-	Id = "TeleDron",
-	Text = "Tele Dron",
-	Default = false,
-	Callback = function(on)
-		-- Cắm logic Tele Dron của bạn vào đây
-		print("[Menu] Tele Dron:", on)
-	end,
-})
-ui:AddNumber("Main", {
-	Id = "TeleDronSafeHeight",
-	Text = "Khoảng cách an toàn (studs)",
-	Min = 2,
-	Max = 50,
-	Step = 1,
-	Default = 10,
-})
-
--- ===== TAB ESP =====
-ui:AddSection("Esp", "Chưa có chức năng")
--- Thêm bằng: ui:AddToggle("Esp", { Id = "...", Text = "...", Callback = function(on) end })
-
--- ===== TAB KHÁC =====
-ui:AddSection("Khác", "Di chuyển")
-ui:AddToggle("Khác", {
-	Id = "FlyAir",
-	Text = "Fly Air",
-	Default = false,
-	Callback = function(on)
-		print("[Menu] Fly Air:", on)
-	end,
-})
-ui:AddNumber("Khác", {
-	Id = "FlySpeed",
-	Text = "Fly Speed",
-	Min = 1,
-	Max = 300,
-	Step = 1,
-	Default = 50,
-})
-ui:AddNumber("Khác", {
-	Id = "Speed",
-	Text = "Speed (WalkSpeed)",
-	Min = 16,
-	Max = 200,
-	Step = 1,
-	Default = 16,
-})
-
--- Lắng nghe chung mọi thay đổi (để kết nối module chức năng)
-ui.ToggleChanged:Connect(function(id, state)
-	print("[Menu] Toggle", id, "=", state)
+-- Phím tắt: Space lên, LeftControl xuống
+Conn.set("keysDown", UIS.InputBegan, function(i, gp)
+	if gp then return end
+	if i.KeyCode == Enum.KeyCode.Space then RT.Vertical = 1 elseif i.KeyCode == Enum.KeyCode.LeftControl then RT.Vertical = -1 end
 end)
-ui.NumberChanged:Connect(function(id, value)
-	print("[Menu] Number", id, "=", value)
+Conn.set("keysUp", UIS.InputEnded, function(i)
+	if i.KeyCode == Enum.KeyCode.Space or i.KeyCode == Enum.KeyCode.LeftControl then RT.Vertical = 0 end
+end)
+
+-- Đồng bộ ô số với giá trị thay đổi tự động (độ cao Dron / độ sâu Down)
+local refreshAcc = 0
+Conn.set("uiRefresh", RunService.Heartbeat, function(dt)
+	refreshAcc += dt
+	if refreshAcc < 0.25 then return end
+	refreshAcc = 0
+	for _, fn in UI.refreshers do fn() end
+end)
+
+-- Nút X: tắt toàn bộ tính năng, khôi phục mọi thứ, ngắt mọi kết nối rồi hủy giao diện
+btnClose.MouseButton1Click:Connect(function()
+	for flag in pairs(F) do State.set(flag, false) end
+	Esp.clearAll()
+	Conn.dropAll()
+	if espGui then espGui:Destroy() end
+	if hlFolder then hlFolder:Destroy() end
+	gui:Destroy()
 end)
