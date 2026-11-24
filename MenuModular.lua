@@ -1,10 +1,10 @@
 --!nonstrict
 --[[
-	UIController (ModuleScript - chỉ chạy phía Client)
-	Vị trí gợi ý: StarterPlayer > StarterPlayerScripts > UIController
+	HpTeamProMenu (LocalScript - FILE ĐẦY ĐỦ, chỉ cần dán 1 file)
+	Vị trí: StarterPlayer > StarterPlayerScripts > LocalScript (tên bất kỳ)
 
 	=== API NHANH ===
-	local UIController = require(script.Parent.UIController)
+	-- (Trong file này UIController đã nằm sẵn bên dưới, không cần require)
 	local ui = UIController.new({
 		Title = "Hp Team Pro V1",        -- tiêu đề
 		Size = Vector2.new(350, 200),    -- kích thước khi mở rộng
@@ -1104,7 +1104,7 @@ end
 
 --[[
 	=== VÍ DỤ SỬ DỤNG (LocalScript) ===
-	local UIController = require(script.Parent.UIController)
+	-- (UIController đã có sẵn trong file này)
 	local ui = UIController.new({ Title = "Hp Team Pro V1", ToggleKey = Enum.KeyCode.RightShift })
 
 	ui:AddSection("Main", "Tele Dron")
@@ -1126,4 +1126,74 @@ end
 	ui:SetValue("TeleDron", false) -- ép tắt, không bắn callback
 ]]
 
-return UIController
+----------------------------------------------------------------------
+-- KHỞI TẠO MENU (phần chạy thật)
+----------------------------------------------------------------------
+local ui = UIController.new({
+	Title = "Hp Team Pro V1",
+	Size = Vector2.new(350, 200),
+	Position = Vector2.new(24, 80),
+	ToggleKey = Enum.KeyCode.RightShift, -- PC: ẩn/hiện menu
+})
+
+-- Cho script khác truy cập: _G.HpTeamProUI:GetValue("FlySpeed")
+_G.HpTeamProUI = ui
+
+-- ===== TAB MAIN =====
+ui:AddSection("Main", "Tele Dron")
+ui:AddToggle("Main", {
+	Id = "TeleDron",
+	Text = "Tele Dron",
+	Default = false,
+	Callback = function(on)
+		-- Cắm logic Tele Dron của bạn vào đây
+		print("[Menu] Tele Dron:", on)
+	end,
+})
+ui:AddNumber("Main", {
+	Id = "TeleDronSafeHeight",
+	Text = "Khoảng cách an toàn (studs)",
+	Min = 2,
+	Max = 50,
+	Step = 1,
+	Default = 10,
+})
+
+-- ===== TAB ESP =====
+ui:AddSection("Esp", "Chưa có chức năng")
+-- Thêm bằng: ui:AddToggle("Esp", { Id = "...", Text = "...", Callback = function(on) end })
+
+-- ===== TAB KHÁC =====
+ui:AddSection("Khác", "Di chuyển")
+ui:AddToggle("Khác", {
+	Id = "FlyAir",
+	Text = "Fly Air",
+	Default = false,
+	Callback = function(on)
+		print("[Menu] Fly Air:", on)
+	end,
+})
+ui:AddNumber("Khác", {
+	Id = "FlySpeed",
+	Text = "Fly Speed",
+	Min = 1,
+	Max = 300,
+	Step = 1,
+	Default = 50,
+})
+ui:AddNumber("Khác", {
+	Id = "Speed",
+	Text = "Speed (WalkSpeed)",
+	Min = 16,
+	Max = 200,
+	Step = 1,
+	Default = 16,
+})
+
+-- Lắng nghe chung mọi thay đổi (để kết nối module chức năng)
+ui.ToggleChanged:Connect(function(id, state)
+	print("[Menu] Toggle", id, "=", state)
+end)
+ui.NumberChanged:Connect(function(id, value)
+	print("[Menu] Number", id, "=", value)
+end)
