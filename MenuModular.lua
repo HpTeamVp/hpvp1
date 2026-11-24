@@ -301,7 +301,7 @@ end
 --------------------------------------------------------------------------------
 -- EspEngine (dựng bằng GUI + Highlight, không phụ thuộc Drawing API)
 --------------------------------------------------------------------------------
-local Esp = { entries = {}, items = {}, itemAcc = 0 }
+local Esp = { entries = {}, items = {}, playerHighlights = {}, itemAcc = 0 }
 local espGui, hlFolder
 
 local function ensureEspLayer()
@@ -338,6 +338,61 @@ end
 function Esp.clearAll()
 	for m in pairs(Esp.entries) do dropEntry(m) end
 	for inst, hl in pairs(Esp.items) do hl:Destroy() Esp.items[inst] = nil end
+	for player, hl in pairs(Esp.playerHighlights) do
+		if hl then hl:Destroy() end
+		Esp.playerHighlights[player] = nil
+	end
+end
+
+-- Hologram riêng cho tất cả người chơi khác (không áp dụng lên LocalPlayer).
+-- Tự cập nhật khi respawn/ra khỏi ScanRange/rời server và dọn Highlight cũ.
+local function playerHologramStep()
+	if not F.EspHologramPlayers then
+		for player, hl in pairs(Esp.playerHighlights) do
+			if hl then hl:Destroy() end
+			Esp.playerHighlights[player] = nil
+		end
+		return
+	end
+
+	local myRoot = Util.hrp()
+	local seen = {}
+	if myRoot then
+		for _, player in Players:GetPlayers() do
+			if player ~= LP then
+				local character = player.Character
+				local hum = character and character:FindFirstChildOfClass("Humanoid")
+				local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+				if character and hum and hum.Health > 0 and root and root:IsA("BasePart") then
+					local distance = (root.Position - myRoot.Position).Magnitude
+					if distance <= Cfg.ScanRange then
+						seen[player] = true
+						local highlight = Esp.playerHighlights[player]
+						if not highlight or highlight.Parent == nil then
+							highlight = Instance.new("Highlight")
+							highlight.Name = "EspHologram_Player_" .. player.UserId
+							highlight.FillColor = Color3.fromRGB(80, 170, 255)
+							highlight.OutlineColor = Color3.fromRGB(225, 245, 255)
+							highlight.FillTransparency = 0.72
+							highlight.OutlineTransparency = 0.05
+							highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+							highlight.Parent = hlFolder
+							Esp.playerHighlights[player] = highlight
+						end
+						highlight.Adornee = character
+						highlight.Enabled = true
+					end
+				end
+			end
+		end
+	end
+
+	for player, highlight in pairs(Esp.playerHighlights) do
+		if not seen[player] or player.Parent ~= Players then
+			if highlight then highlight:Destroy() end
+			Esp.playerHighlights[player] = nil
+		end
+	end
 end
 
 -- 3D bounding box -> hình chữ nhật 2D (World-to-Screen), nil nếu một góc nằm sau camera
@@ -486,6 +541,7 @@ local function espStep(dt)
 	else
 		for m in pairs(Esp.entries) do dropEntry(m) end
 	end
+	playerHologramStep()
 	if F.EspWorkspace then
 		Esp.itemAcc += dt
 		if Esp.itemAcc >= 0.4 then Esp.itemAcc = 0 itemStep() end
@@ -493,7 +549,7 @@ local function espStep(dt)
 		for obj, h in pairs(Esp.items) do h:Destroy() Esp.items[obj] = nil end
 	end
 end
-local ESP_FLAGS = { "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram", "EspWorkspace" }
+local ESP_FLAGS = { "EspLine", "EspBox", "EspName", "EspDistance", "EspHologram", "EspHologramPlayers", "EspWorkspace" }
 for _, f in ESP_FLAGS do
 	State.listen(f, function()
 		local any = false
@@ -860,6 +916,7 @@ toggleRow("Esp", "Esp Box", "EspBox")
 toggleRow("Esp", "Esp Name", "EspName")
 toggleRow("Esp", "Esp Distance", "EspDistance")
 toggleRow("Esp", "Esp Hologram", "EspHologram")
+toggleRow("Esp", "Esp Hologram All Player", "EspHologramPlayers")
 toggleRow("Esp", "Esp Workspace", "EspWorkspace")
 
 toggleRow("Khác", "Fly Down", "FlyDown")
