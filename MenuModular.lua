@@ -253,8 +253,35 @@ end
 -- Client-side visual effects for Main tab.
 -- These edits are local only; server-authoritative damage/hitboxes are unchanged.
 local shapeOrig = setmetatable({}, { __mode = "k" }) -- BasePart -> original Size/CFrame
-local barrierPart, barrierForceField
+local barrierPart
 local barrierCharacter
+local barrierCollisionGroup = "LocalBarrierWalls"
+local playerCollisionGroup = "LocalBarrierOwner"
+local barrierGroupsReady = false
+
+local function setupBarrierCollisionGroups()
+	if barrierGroupsReady then return true end
+	local ok = pcall(function()
+		local PhysicsService = game:GetService("PhysicsService")
+		pcall(function() PhysicsService:RegisterCollisionGroup(barrierCollisionGroup) end)
+		pcall(function() PhysicsService:RegisterCollisionGroup(playerCollisionGroup) end)
+		-- The owner's character must never collide with its own surrounding shell.
+		PhysicsService:CollisionGroupSetCollidable(barrierCollisionGroup, playerCollisionGroup, false)
+		-- Other characters/NPCs remain in their existing group and can collide
+		-- with the shell, subject to the game's local physics/network ownership.
+		PhysicsService:CollisionGroupSetCollidable(barrierCollisionGroup, "Default", true)
+	end)
+	barrierGroupsReady = ok
+	return ok
+end
+
+local function setCharacterCollisionGroup(character, groupName)
+	for _, item in ipairs(character:GetDescendants()) do
+		if item:IsA("BasePart") then
+			pcall(function() item.CollisionGroup = groupName end)
+		end
+	end
+end
 
 local function restoreShape(part)
 	local original = shapeOrig[part]
@@ -285,6 +312,9 @@ local function destroyPlayerBarrier()
 		barrierPart:Destroy()
 		barrierPart = nil
 	end
+	if barrierCharacter and barrierCharacter.Parent then
+		setCharacterCollisionGroup(barrierCharacter, "Default")
+	end
 	barrierCharacter = nil
 end
 
@@ -296,12 +326,15 @@ local function updatePlayerBarrier()
 		return
 	end
 
-	-- Build a hollow four-sided fence instead of a solid sphere. A sphere with
-	-- CanCollide=true encloses the character inside solid geometry, causing
-	-- physics to eject the character upward or sideways.
+	-- Hollow four-wall glass-like shell. The owner's character is assigned to
+	-- a separate collision group so it cannot collide with (or be pushed by)
+	-- its own barrier. Other NPCs in Default can collide with the walls locally.
 	if barrierCharacter ~= character or not barrierPart or not barrierPart.Parent then
 		destroyPlayerBarrier()
 		barrierCharacter = character
+		setupBarrierCollisionGroups()
+		setCharacterCollisionGroup(character, playerCollisionGroup)
+
 		barrierPart = Instance.new("Model")
 		barrierPart.Name = "LocalPlayerBarrierFence"
 		barrierPart.Parent = Workspace
@@ -309,13 +342,14 @@ local function updatePlayerBarrier()
 			local wall = Instance.new("Part")
 			wall.Name = "BarrierWall" .. i
 			wall.Anchored = true
-			wall.Material = Enum.Material.ForceField
-			wall.Color = Color3.fromRGB(70, 170, 255)
-			wall.Transparency = 0.78
+			wall.Material = Enum.Material.Glass
+			wall.Color = Color3.fromRGB(150, 210, 255)
+			wall.Transparency = 0.88
 			wall.CanCollide = true
 			wall.CanTouch = false
-			wall.CanQuery = false
+			wall.CanQuery = true
 			wall.CastShadow = false
+			pcall(function() wall.CollisionGroup = barrierCollisionGroup end)
 			wall.Parent = barrierPart
 		end
 	end
@@ -324,18 +358,20 @@ local function updatePlayerBarrier()
 	local height = 9
 	local thickness = 0.45
 	local center = root.Position + Vector3.new(0, 1.5, 0)
+	local frame = CFrame.new(center) -- keep the shell aligned to the player's current position
 	local walls = barrierPart:GetChildren()
+	local half = math.max(0.5, radius - thickness / 2)
 	local placements = {
-		{ Vector3.new(0, 0, -radius), Vector3.new(radius * 2, height, thickness), 0 },
-		{ Vector3.new(0, 0, radius), Vector3.new(radius * 2, height, thickness), 0 },
-		{ Vector3.new(-radius, 0, 0), Vector3.new(thickness, height, radius * 2), 0 },
-		{ Vector3.new(radius, 0, 0), Vector3.new(thickness, height, radius * 2), 0 },
+		{ CFrame.new(0, 0, -half), Vector3.new(radius * 2, height, thickness) },
+		{ CFrame.new(0, 0, half), Vector3.new(radius * 2, height, thickness) },
+		{ CFrame.new(-half, 0, 0), Vector3.new(thickness, height, radius * 2) },
+		{ CFrame.new(half, 0, 0), Vector3.new(thickness, height, radius * 2) },
 	}
 	for i, wall in ipairs(walls) do
 		local data = placements[i]
 		if wall:IsA("BasePart") and data then
 			wall.Size = data[2]
-			wall.CFrame = CFrame.new(center + data[1])
+			wall.CFrame = frame * data[1]
 		end
 	end
 end
@@ -989,7 +1025,7 @@ numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
 toggleRow("Main", "Hitbox All Mod", "HitboxAll")
 numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
 toggleRow("Main", "All Mod Im", "AllModIm")
-toggleRow("Main", "Player Barrier (Local Collision)", "PlayerBarrier")
+toggleRow("Main", "Player Barrier (Visual / No Push)", "PlayerBarrier")
 numberRow("Main", "  Barrier Radius", "BarrierRadius", 2, 30)
 toggleRow("Main", "Long Legs (Mob)", "LongLegs")
 numberRow("Main", "  Long Legs Scale", "LongLegsScale", 1, 10)
