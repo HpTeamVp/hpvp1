@@ -66,7 +66,7 @@ local State = {
 		FlyDownDepth = 6,     -- độ sâu dưới mặt đất (Fly Down)
 		FlySpeed = 60, WalkSpeed = 40,
 		HitboxSize = 25, AimSmooth = 0.35, AttackInterval = 0.12, HoverRate = 15,
-		BarrierRadius = 8, LongLegsScale = 3, LongHeadHeight = 3,
+		BarrierRadius = 8, BarrierHeight = 12, LongLegsScale = 3, LongHeadHeight = 3,
 	},
 	Runtime = { Vertical = 0 }, -- -1 / 0 / 1: nút giữ để tăng/giảm độ cao
 	_snap = {}, _listeners = {},
@@ -1027,6 +1027,7 @@ numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
 toggleRow("Main", "All Mod Im", "AllModIm")
 toggleRow("Main", "Player Barrier (Visual / No Push)", "PlayerBarrier")
 numberRow("Main", "  Barrier Radius", "BarrierRadius", 2, 30)
+numberRow("Main", "  Barrier Height", "BarrierHeight", 4, 60)
 toggleRow("Main", "Long Legs (Mob)", "LongLegs")
 numberRow("Main", "  Long Legs Scale", "LongLegsScale", 1, 10)
 toggleRow("Main", "Long Head (Mob)", "LongHead")
