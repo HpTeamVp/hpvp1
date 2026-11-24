@@ -306,11 +306,13 @@ local function updatePlayerBarrier()
 		barrierPart.Shape = Enum.PartType.Ball
 		barrierPart.Material = Enum.Material.ForceField
 		barrierPart.Color = Color3.fromRGB(70, 170, 255)
-		barrierPart.Transparency = 0.55
+		barrierPart.Transparency = 0.78
 		barrierPart.Anchored = true
-		barrierPart.CanCollide = false
+		-- Client-side collision shell: may collide with locally simulated NPCs,
+		-- but cannot guarantee blocking server-owned/network-owned NPCs.
+		barrierPart.CanCollide = true
 		barrierPart.CanTouch = false
-		barrierPart.CanQuery = false
+		barrierPart.CanQuery = true
 		barrierPart.CastShadow = false
 		barrierPart.Parent = Workspace
 	end
@@ -326,7 +328,7 @@ local function applyMobShapes(model)
 		local factor = Cfg.LongHeadHeight
 		applyScaledPart(
 			head,
-			function(original) return Vector3.new(original.X * math.sqrt(factor), original.Y * factor, original.Z * math.sqrt(factor)) end,
+			function(original) return Vector3.new(original.X, original.Y * factor, original.Z) end,
 			function(original) return Vector3.new(0, original.Y * (factor - 1) / 2, 0) end
 		)
 	elseif head and shapeOrig[head] then
@@ -969,7 +971,7 @@ numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
 toggleRow("Main", "Hitbox All Mod", "HitboxAll")
 numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
 toggleRow("Main", "All Mod Im", "AllModIm")
-toggleRow("Main", "Player Barrier (Client)", "PlayerBarrier")
+toggleRow("Main", "Player Barrier (Local Collision)", "PlayerBarrier")
 numberRow("Main", "  Barrier Radius", "BarrierRadius", 2, 30)
 toggleRow("Main", "Long Legs (Mob)", "LongLegs")
 numberRow("Main", "  Long Legs Scale", "LongLegsScale", 1, 10)
