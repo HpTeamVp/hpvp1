@@ -39,7 +39,7 @@ local State = {
 	Config = {
 		ScanRange = 150, SafeHeight = 12, FlySpeed = 60, WalkSpeed = 16,
 		DroneHeight = 6, DownDepth = 8, HitboxSize = 15, UndergroundDepth = 30,
-		HeadDepth = 6, LongLegs = 40, BarrierRadius = 12, AimSmooth = 0.35,
+		HeadDepth = 6, LongLegs = 40, BarrierRadius = 12, BarrierHeight = 16, AimSmooth = 0.35,
 		AttackInterval = 0.15,
 	},
 	Flags = {},      -- [tên] = bool
@@ -340,43 +340,115 @@ State.Register("Player Barrier", function()
 	local j = State.Janitor("Player Barrier")
 	local folder = j:Add(Instance.new("Folder"))
 	folder.Name = "PB_Barrier"; folder.Parent = Workspace
-	local walls, N = {}, 12
-	for i = 1, N do
-		local w = Instance.new("Part")
-		w.Anchored, w.CanCollide, w.CanQuery, w.Transparency = true, true, false, 1
-		w.Size = Vector3.new(2 * State.Config.BarrierRadius * math.tan(math.pi / N) + 1, 16, 1)
-		w.Parent = folder
-		walls[i] = w
+	local N, THICK = 24, 3 -- 24 tấm, dày 3 studs, chồng lấn nhau => không có khe hở
+	local walls, built, linked = {}, nil, {}
+
+	-- Dựng lại toàn bộ rào khi đổi bán kính/chiều cao (tùy chỉnh theo thời gian thực)
+	local function rebuild()
+		folder:ClearAllChildren()
+		table.clear(walls); table.clear(linked)
+		local R, H = State.Config.BarrierRadius, State.Config.BarrierHeight
+		-- bề rộng mỗi tấm = dây cung + phần chồng lấn để kín mít ở các góc
+		local width = 2 * (R + THICK / 2) * math.tan(math.pi / N) + THICK + 1
+		for i = 1, N do
+			local w = Instance.new("Part")
+			w.Name = "Wall"
+			w.Anchored, w.CanCollide, w.CanQuery, w.CanTouch, w.Transparency = true, true, false, false, 1
+			w.Size = Vector3.new(width, H, THICK)
+			w.Parent = folder
+			walls[i] = w
+		end
+		-- nắp trên đậy kín (đường kính phủ toàn bộ vòng tròn)
+		local lid = Instance.new("Part")
+		lid.Name = "Lid"
+		lid.Anchored, lid.CanCollide, lid.CanQuery, lid.CanTouch, lid.Transparency = true, true, false, false, 1
+		lid.Size = Vector3.new(2 * R + 2 * THICK + 2, THICK, 2 * R + 2 * THICK + 2)
+		lid.Parent = folder
+		walls.Lid = lid
+		built = { R, H }
 	end
-	local linked = {}
+	rebuild()
+
 	j:Add(RunService.Heartbeat:Connect(function()
 		local ch, _, root = getChar()
 		if not ch then return end
-		for _, d in ipairs(ch:GetDescendants()) do -- không va chạm với thân mình
+		if built[1] ~= State.Config.BarrierRadius or built[2] ~= State.Config.BarrierHeight then rebuild() end
+		local R, H = State.Config.BarrierRadius, State.Config.BarrierHeight
+		-- không va chạm với chính thân mình (cả tấm mới tạo khi rebuild)
+		for _, d in ipairs(ch:GetDescendants()) do
 			if d:IsA("BasePart") and not linked[d] then
 				linked[d] = true
-				for _, w in ipairs(walls) do
+				for _, w in pairs(walls) do
 					local c = Instance.new("NoCollisionConstraint")
 					c.Part0, c.Part1, c.Parent = d, w, w
 				end
 			end
 		end
-		for i, w in ipairs(walls) do
+		local base = root.Position - Vector3.new(0, 3, 0) -- chân người chơi
+		for i = 1, N do
 			local a = (i / N) * math.pi * 2
-			local off = Vector3.new(math.cos(a), 0, math.sin(a)) * State.Config.BarrierRadius
-			w.CFrame = CFrame.lookAt(root.Position + off, root.Position)
+			local dir = Vector3.new(math.cos(a), 0, math.sin(a))
+			local pos = base + dir * (R + THICK / 2) + Vector3.new(0, H / 2, 0)
+			walls[i].CFrame = CFrame.lookAt(pos, pos - dir)
 		end
+		walls.Lid.CFrame = CFrame.new(base + Vector3.new(0, H + THICK / 2, 0))
 	end))
 end, function() end)
 
 -- Long Legs: kéo dài chân mob xuống lòng đất (cục bộ) để dễ đánh trúng
-local LEG = { LeftLowerLeg = 1, RightLowerLeg = 1, ["Left Leg"] = 1, ["Right Leg"] = 1 }
 local Legs = {}
+local LEG_PATTERNS = { "leg", "foot", "feet", "thigh", "calf", "shin", "knee" }
+local function isLegPart(p)
+	if not p:IsA("BasePart") then return false end
+	local n = p.Name:lower()
+	for _, k in ipairs(LEG_PATTERNS) do
+		if n:find(k, 1, true) then return true end
+	end
+	return false
+end
 local function legRestore(model)
 	local s = Legs[model]
 	if not s then return end
 	Legs[model] = nil
-	for part, size in pairs(s) do if part.Parent then part.Size = size end end
+	for part, o in pairs(s.Parts) do
+		if part.Parent then part.Size = o.Size end
+	end
+	for motor, c1 in pairs(s.Motors) do
+		if motor.Parent then motor.C1 = c1 end
+	end
+	if s.Ext then s.Ext:Destroy() end
+end
+-- Dựng chân dài: (1) kéo dài các part chân + dịch Motor6D để chân dài xuống DƯỚI,
+-- (2) thêm 1 hộp hitbox vô hình hàn dưới chân, cắm xuống lòng đất (hoạt động với mọi rig).
+local function legBuild(t)
+	local m, root, L = t.Model, t.Root, State.Config.LongLegs
+	local s = { Parts = {}, Motors = {}, Ext = nil, L = L }
+	for _, p in ipairs(m:GetDescendants()) do
+		if isLegPart(p) then
+			s.Parts[p] = { Size = p.Size }
+			for _, mo in ipairs(m:GetDescendants()) do
+				if mo:IsA("Motor6D") and mo.Part1 == p and s.Motors[mo] == nil then
+					s.Motors[mo] = mo.C1
+				end
+			end
+		end
+	end
+	local cf, size = m:GetBoundingBox()
+	local ext = Instance.new("Part")
+	ext.Name = "LongLegHitbox"
+	ext.Anchored, ext.CanCollide, ext.CanQuery, ext.CanTouch, ext.Massless = false, false, true, true, true
+	ext.Transparency = 0.85
+	ext.Color = Color3.fromRGB(255, 170, 0)
+	ext.Material = Enum.Material.Neon
+	local w = math.max(size.X, size.Z) * 0.8
+	ext.Size = Vector3.new(w, L, w)
+	-- đặt ngay dưới đáy bounding box, kéo xuống sâu L studs
+	ext.CFrame = CFrame.new(cf.Position.X, cf.Position.Y - size.Y / 2 - L / 2, cf.Position.Z)
+	ext.Parent = m
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0, weld.Part1, weld.Parent = root, ext, ext
+	s.Ext = ext
+	Legs[m] = s
 end
 State.Register("Long Legs", function()
 	local j = State.Janitor("Long Legs")
@@ -385,18 +457,26 @@ State.Register("Long Legs", function()
 		for _, t in ipairs(Scanner.Scan()) do
 			local m = t.Model
 			inRange[m] = true
-			if not Legs[m] then
-				local s = {}
-				for _, p in ipairs(m:GetChildren()) do
-					if p:IsA("BasePart") and LEG[p.Name] then s[p] = p.Size end
+			local s = Legs[m]
+			if s and s.L ~= State.Config.LongLegs then legRestore(m); s = nil end -- đổi độ dài: dựng lại
+			if not s then legBuild(t); s = Legs[m] end
+			local L = State.Config.LongLegs
+			for p, o in pairs(s.Parts) do
+				if p.Parent then
+					local want = Vector3.new(o.Size.X, o.Size.Y + L, o.Size.Z)
+					if p.Size ~= want then p.Size = want end
 				end
-				Legs[m] = s
 			end
-			for p, orig in pairs(Legs[m]) do
-				if p.Parent then p.Size = Vector3.new(orig.X, orig.Y + State.Config.LongLegs, orig.Z) end
+			for mo, c1 in pairs(s.Motors) do
+				-- Size đổi quanh tâm nên dịch C1 L/2 để chân chỉ dài xuống dưới
+				if mo.Parent then mo.C1 = c1 * CFrame.new(0, L / 2, 0) end
 			end
+			-- hộp hitbox có thể bị gỡ khi mob respawn part: dựng lại nếu mất
+			if not s.Ext or not s.Ext.Parent then legRestore(m) end
 		end
-		for m in pairs(Legs) do if not inRange[m] or not m.Parent then legRestore(m) end end
+		for m in pairs(Legs) do
+			if not inRange[m] or not m.Parent then legRestore(m) end
+		end
 	end))
 	j:Add(function() for m in pairs(Legs) do legRestore(m) end end)
 end, function() end)
@@ -884,6 +964,8 @@ function UI.Build()
 	for _, f in ipairs({ "Tele Dron", "Hitbox All Mod", "Tele Kill", "Aimbot", "All Mod Im", "Model Độn Thổ",
 		"Model head down", "Player Barrier", "Long Legs" }) do addToggle(main_, f) end
 	addNumber(main_, "Khoảng cách an toàn Tele Dron", "SafeHeight", 2, 100)
+	addNumber(main_, "Barrier rộng (bán kính)", "BarrierRadius", 3, 100)
+	addNumber(main_, "Barrier cao", "BarrierHeight", 4, 200)
 	addNumber(main_, "Cỡ Hitbox", "HitboxSize", 2, 80)
 	addNumber(main_, "Độ sâu Độn Thổ", "UndergroundDepth", 2, 300)
 	addNumber(main_, "Độ sâu Head Down", "HeadDepth", 0, 50)
