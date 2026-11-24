@@ -66,6 +66,7 @@ local State = {
 		FlyDownDepth = 6,     -- độ sâu dưới mặt đất (Fly Down)
 		FlySpeed = 60, WalkSpeed = 40,
 		HitboxSize = 25, AimSmooth = 0.35, AttackInterval = 0.12, HoverRate = 15,
+		BarrierRadius = 8, LongLegsScale = 3, LongHeadHeight = 3,
 	},
 	Runtime = { Vertical = 0 }, -- -1 / 0 / 1: nút giữ để tăng/giảm độ cao
 	_snap = {}, _listeners = {},
@@ -249,6 +250,115 @@ local function restoreMob(hum)
 	imOrig[hum] = nil
 end
 
+-- Client-side visual effects for Main tab.
+-- These edits are local only; server-authoritative damage/hitboxes are unchanged.
+local shapeOrig = setmetatable({}, { __mode = "k" }) -- BasePart -> original Size/CFrame
+local barrierPart, barrierForceField
+local barrierCharacter
+
+local function restoreShape(part)
+	local original = shapeOrig[part]
+	if original and part.Parent then
+		part.Size = original.Size
+		part.CFrame = original.CFrame
+	end
+	shapeOrig[part] = nil
+end
+
+local function restoreModelShapes(model)
+	for part in pairs(shapeOrig) do
+		if part:IsDescendantOf(model) then restoreShape(part) end
+	end
+end
+
+local function applyScaledPart(part, size, offset)
+	if not shapeOrig[part] then
+		shapeOrig[part] = { Size = part.Size, CFrame = part.CFrame }
+	end
+	local original = shapeOrig[part]
+	part.Size = size(original.Size)
+	part.CFrame = original.CFrame * CFrame.new(offset(original.Size))
+end
+
+local function updatePlayerBarrier()
+	local character = LP.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not F.PlayerBarrier or not root then
+		if barrierPart then barrierPart:Destroy(); barrierPart = nil end
+		if barrierForceField then barrierForceField:Destroy(); barrierForceField = nil end
+		barrierCharacter = nil
+		return
+	end
+
+	if barrierCharacter ~= character then
+		if barrierPart then barrierPart:Destroy() end
+		if barrierForceField then barrierForceField:Destroy() end
+		barrierCharacter = character
+
+		-- Local visual indicator only. A client-created ForceField cannot
+		-- prevent damage that is validated and applied by the server.
+		barrierForceField = Instance.new("ForceField")
+		barrierForceField.Visible = true
+		barrierForceField.Parent = character
+
+		barrierPart = Instance.new("Part")
+		barrierPart.Name = "LocalPlayerBarrierVisual"
+		barrierPart.Shape = Enum.PartType.Ball
+		barrierPart.Material = Enum.Material.ForceField
+		barrierPart.Color = Color3.fromRGB(70, 170, 255)
+		barrierPart.Transparency = 0.55
+		barrierPart.Anchored = true
+		barrierPart.CanCollide = false
+		barrierPart.CanTouch = false
+		barrierPart.CanQuery = false
+		barrierPart.CastShadow = false
+		barrierPart.Parent = Workspace
+	end
+
+	local diameter = Cfg.BarrierRadius * 2
+	barrierPart.Size = Vector3.new(diameter, diameter, diameter)
+	barrierPart.CFrame = root.CFrame
+end
+
+local function applyMobShapes(model)
+	local head = model:FindFirstChild("Head")
+	if F.LongHead and head and head:IsA("BasePart") then
+		local factor = Cfg.LongHeadHeight
+		applyScaledPart(
+			head,
+			function(original) return Vector3.new(original.X * math.sqrt(factor), original.Y * factor, original.Z * math.sqrt(factor)) end,
+			function(original) return Vector3.new(0, original.Y * (factor - 1) / 2, 0) end
+		)
+	elseif head and shapeOrig[head] then
+		restoreShape(head)
+	end
+
+	local legNames = {
+		["Left Leg"] = true, ["Right Leg"] = true,
+		["LeftUpperLeg"] = true, ["RightUpperLeg"] = true,
+		["LeftLowerLeg"] = true, ["RightLowerLeg"] = true,
+		["LeftFoot"] = true, ["RightFoot"] = true,
+	}
+	for _, part in model:GetDescendants() do
+		if part:IsA("BasePart") and legNames[part.Name] then
+			if F.LongLegs then
+				local factor = Cfg.LongLegsScale
+				applyScaledPart(
+					part,
+					function(original) return Vector3.new(original.X, original.Y * factor, original.Z) end,
+					function(original) return Vector3.new(0, -original.Y * (factor - 1) / 2, 0) end
+				)
+			elseif shapeOrig[part] then
+				restoreShape(part)
+			end
+		end
+	end
+end
+
+local function restoreAllMobShapes()
+	for part in pairs(shapeOrig) do restoreShape(part) end
+end
+
 local modAcc = 0
 local function modStep(dt)
 	modAcc += dt
@@ -257,6 +367,7 @@ local function modStep(dt)
 	local inRange = {}
 	for _, t in Scanner.get() do
 		inRange[t.root], inRange[t.hum] = true, true
+		if F.LongLegs or F.LongHead then applyMobShapes(t.model) else restoreModelShapes(t.model) end
 		if F.HitboxAll then
 			if not hbOrig[t.root] then
 				hbOrig[t.root] = { Size = t.root.Size, CanCollide = t.root.CanCollide, Transparency = t.root.Transparency, Massless = t.root.Massless }
@@ -278,20 +389,27 @@ local function modStep(dt)
 	-- trả lại mục tiêu đã ra ngoài tầm / chết / tắt tính năng
 	for root in pairs(hbOrig) do if not F.HitboxAll or not inRange[root] then restoreHitbox(root) end end
 	for hum in pairs(imOrig) do if not F.AllModIm or not inRange[hum] then restoreMob(hum) end end
+	for part in pairs(shapeOrig) do
+		local model = part:FindFirstAncestorOfClass("Model")
+		if not (F.LongLegs or F.LongHead) or not model or not Scanner.validate(model) then restoreShape(part) end
+	end
+	updatePlayerBarrier()
 end
 
 local function updateCombatConns()
 	if F.TeleDron or F.TeleKill then Conn.set("combat", RunService.Heartbeat, combatStep) else Conn.drop("combat") end
 	if F.Aimbot then Conn.set("aim", RunService.RenderStepped, aimStep) else Conn.drop("aim") aimLast = nil end
-	if F.HitboxAll or F.AllModIm then
+	if F.HitboxAll or F.AllModIm or F.LongLegs or F.LongHead or F.PlayerBarrier then
 		Conn.set("mods", RunService.Heartbeat, modStep)
 	else
 		Conn.drop("mods")
 		for r in pairs(hbOrig) do restoreHitbox(r) end
 		for h in pairs(imOrig) do restoreMob(h) end
+		restoreAllMobShapes()
+		updatePlayerBarrier()
 	end
 end
-for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm" } do
+for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm", "LongLegs", "LongHead", "PlayerBarrier" } do
 	State.listen(f, function()
 		if not (F.TeleDron or F.TeleKill) then Combat.lock = nil end
 		updateCombatConns()
@@ -851,6 +969,12 @@ numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
 toggleRow("Main", "Hitbox All Mod", "HitboxAll")
 numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
 toggleRow("Main", "All Mod Im", "AllModIm")
+toggleRow("Main", "Player Barrier (Client)", "PlayerBarrier")
+numberRow("Main", "  Barrier Radius", "BarrierRadius", 2, 30)
+toggleRow("Main", "Long Legs (Mob)", "LongLegs")
+numberRow("Main", "  Long Legs Scale", "LongLegsScale", 1, 10)
+toggleRow("Main", "Long Head (Mob)", "LongHead")
+numberRow("Main", "  Long Head Height", "LongHeadHeight", 1, 10)
 toggleRow("Main", "Tele Kill", "TeleKill")
 toggleRow("Main", "Aimbot", "Aimbot")
 numberRow("Main", "  Phạm vi quét", "ScanRange", 10, 500)
