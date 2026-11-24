@@ -1,116 +1,135 @@
 --[[
-    DebugGUI.lua - Hệ thống giao diện debug/test hoàn chỉnh
+    DebugGUI.lua - Giao diện debug/test hoàn chỉnh cho Roblox
     Tác giả: Senior Roblox/Luau Engineer
-    Kiến trúc: Modular (StateManager, TargetScanner, CombatEngine, EspEngine, MovementAndWorld, UIController)
-    Phạm vi mặc định: 150 studs
+    Kiến trúc: StateManager | TargetScanner | CombatEngine | EspEngine | MovementAndWorld | UIController
     
-    CÁCH CẮM CƠ CHẾ TẤN CÔNG CỦA GAME:
-    Tìm hàm `CombatEngine.AttackHook(target, mode)` ở cuối phần CombatEngine
-    và thay thế nội dung bằng logic tấn công/bắn của game bạn.
-    Ví dụ: gọi RemoteEvent fireServer, kích hoạt Tool:Activate(), v.v.
+    CÁCH CẮM CƠ CHẾ TẤN CÔNG CỦA GAME VÀO CombatEngine:
+    - Tìm hàm `AttackHook(target, mode)` ở cuối phần CombatEngine
+    - Thay thế `-- TODO: gọi hàm tấn công của game tại đây` bằng API tấn công thực tế
+    - Ví dụ: game.ReplicatedStorage.RemoteEvents.Attack:FireServer(target, mode)
 ]]
 
--- ============================================================
--- KHỞI TẠO DỊCH VỤ
--- ============================================================
-local Players         = game:GetService("Players")
-local RunService      = game:GetService("RunService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService    = game:GetService("TweenService")
-local Lighting        = game:GetService("Lighting")
-local Workspace       = game:GetService("Workspace")
-local CoreGui         = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera      = Workspace.CurrentCamera
+local Camera = Workspace.CurrentCamera
 
--- Utility: lấy character an toàn
-local function GetCharacter()
-    return LocalPlayer.Character
-end
-
-local function GetRoot()
-    local char = GetCharacter()
-    return char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
-end
-
-local function GetHumanoid()
-    local char = GetCharacter()
-    return char and char:FindFirstChildOfClass("Humanoid")
+-- Đợi character load
+local function waitForCharacter()
+    if not LocalPlayer.Character then
+        LocalPlayer.CharacterAdded:Wait()
+    end
+    local char = LocalPlayer.Character
+    char:WaitForChild("HumanoidRootPart", 10)
+    char:WaitForChild("Humanoid", 10)
+    return char
 end
 
 -- ============================================================
 -- MODULE: StateManager
--- Quản lý trạng thái ON/OFF và snapshot giá trị gốc
+-- Quản lý trạng thái, cấu hình, snapshot khôi phục
 -- ============================================================
 local StateManager = {}
-StateManager._states    = {}  -- [featureName] = bool
-StateManager._snapshots = {}  -- [featureName] = {key=value, ...}
-StateManager._configs   = {
-    ScanRange        = 150,
-    DroneHeightOffset = 12,
-    FlySpeed         = 50,
-    WalkSpeed        = 16,
-    TeleDronSafeHeight = 12,
-    FlyAirSpeed      = 50,
-    HitboxSize       = Vector3.new(10, 10, 10),
-    PlayerBarrierSize = 10,
-    ModelBuryDepth   = -5,
-    ModelHeadDepth   = -3,
-    LongLegsDepth    = -15,
-    LongHeadHeight   = 10,
-    FlyDronHeight    = 6,
-    FlyDownDepth     = -5,
-}
+StateManager.__index = StateManager
 
--- Bật/tắt tính năng và trả về trạng thái mới
+function StateManager.new()
+    local self = setmetatable({}, StateManager)
+    -- Trạng thái bật/tắt từng tính năng
+    self.States = {
+        TeleDron = false,
+        HitboxAllMod = false,
+        TeleKill = false,
+        Aimbot = false,
+        AllModIm = false,
+        ModelDonTho = false,
+        ModelHeadDown = false,
+        PlayerBarrier = false,
+        LongLegs = false,
+        LongHead = false,
+        EspLine = false,
+        EspBox = false,
+        EspName = false,
+        EspDistance = false,
+        EspHologram = false,
+        FlyDown = false,
+        FlyDron = false,
+        NoClip = false,
+        FlyAir = false,
+        Speed = false,
+        JumpingAir = false,
+        NightVision = false,
+        FixLag = false,
+    }
+    -- Tham số cấu hình
+    self.Config = {
+        ScanRange = 150,
+        DroneHeightOffset = 10,   -- Độ cao lơ lửng trên mob (Tele Dron)
+        FlySpeed = 6,              -- Tốc độ bay mặc định
+        WalkSpeed = 16,            -- Tốc độ đi bộ mặc định
+        HitboxSize = 10,           -- Kích thước hitbox tăng
+        BarrierSize = 8,           -- Kích thước rào chắn
+        DonThoDepth = -15,         -- Độ sâu độn thổ (studs)
+        HeadDownDepth = -5,        -- Độ sâu cắm đầu
+        LongLegsDepth = -20,       -- Độ dài chân xuống đất
+        LongHeadHeight = 10,       -- Độ cao đầu dài
+        FlyDronHeight = 6,         -- Độ cao FlyDron mặc định
+    }
+    -- Snapshot lưu giá trị gốc
+    self.Snapshots = {}
+    return self
+end
+
+function StateManager:SaveSnapshot(key, value)
+    self.Snapshots[key] = value
+end
+
+function StateManager:GetSnapshot(key)
+    return self.Snapshots[key]
+end
+
+function StateManager:ClearSnapshot(key)
+    self.Snapshots[key] = nil
+end
+
 function StateManager:Toggle(feature)
-    self._states[feature] = not self._states[feature]
-    return self._states[feature]
+    self.States[feature] = not self.States[feature]
+    return self.States[feature]
 end
 
 function StateManager:IsOn(feature)
-    return self._states[feature] == true
+    return self.States[feature] == true
 end
 
-function StateManager:SetConfig(key, value)
-    self._configs[key] = value
-end
-
-function StateManager:GetConfig(key)
-    return self._configs[key]
-end
-
--- Lưu snapshot giá trị gốc trước khi bật tính năng
-function StateManager:SaveSnapshot(feature, data)
-    self._snapshots[feature] = data
-end
-
-function StateManager:GetSnapshot(feature)
-    return self._snapshots[feature] or {}
-end
-
-function StateManager:ClearSnapshot(feature)
-    self._snapshots[feature] = nil
-end
+local State = StateManager.new()
 
 -- ============================================================
 -- MODULE: TargetScanner
--- Quét mục tiêu hợp lệ trong phạm vi 150, cache theo frame
+-- Quét mục tiêu hợp lệ trong 150 studs, cache theo frame
 -- ============================================================
 local TargetScanner = {}
-TargetScanner._cache       = {}
-TargetScanner._lastScanTick = 0
-TargetScanner._scanInterval = 0.2  -- Quét lại mỗi 0.2 giây để tiết kiệm CPU
+TargetScanner.__index = TargetScanner
 
--- Kiểm tra model có hợp lệ không
-local function IsValidTarget(model)
-    if not model or not model.Parent then return false end
-    -- Loại trừ chính người chơi
-    if model == GetCharacter() then return false end
-    -- Loại trừ nhân vật người chơi khác (chỉ lấy NPC/Mob)
+function TargetScanner.new()
+    local self = setmetatable({}, TargetScanner)
+    self._cache = {}           -- Cache danh sách mục tiêu
+    self._lastScanFrame = 0    -- Frame cuối cùng quét
+    self._scanInterval = 10    -- Quét lại mỗi 10 frame để tiết kiệm CPU
+    return self
+end
+
+-- Kiểm tra model có hợp lệ không (NPC/Mob, không phải player)
+function TargetScanner:IsValidTarget(model)
+    if not model or not model:IsA("Model") then return false end
+    -- Loại bỏ chính mình
+    if model == LocalPlayer.Character then return false end
+    -- Loại bỏ nhân vật của player khác
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character == model then return false end
+        if p.Character == model then return false end
     end
     -- Phải có Humanoid còn sống
     local hum = model:FindFirstChildOfClass("Humanoid")
@@ -121,1478 +140,1484 @@ local function IsValidTarget(model)
     return true
 end
 
--- Lấy vị trí của mục tiêu
-function TargetScanner:GetTargetPos(model)
-    local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-    return root and root.Position or nil
-end
+-- Lấy danh sách mục tiêu (có cache theo frame)
+function TargetScanner:GetTargets()
+    local currentFrame = RunService.Heartbeat:Wait() and tick()
+    -- Dùng frame counter thực tế
+    local char = LocalPlayer.Character
+    if not char then return {} end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return {} end
 
--- Quét tất cả mục tiêu hợp lệ, sắp xếp theo khoảng cách
-function TargetScanner:Scan()
-    local now = tick()
-    if now - self._lastScanTick < self._scanInterval then
+    -- Kiểm tra xem có cần quét lại không (dùng tick để debounce)
+    if tick() - (self._lastScanTick or 0) < 0.1 then
         return self._cache
     end
-    self._lastScanTick = now
+    self._lastScanTick = tick()
 
-    local playerRoot = GetRoot()
-    if not playerRoot then
-        self._cache = {}
-        return self._cache
-    end
+    local targets = {}
+    local myPos = root.Position
+    local range = State.Config.ScanRange
 
-    local playerPos = playerRoot.Position
-    local range     = StateManager:GetConfig("ScanRange")
-    local results   = {}
-
-    -- Quét tất cả model trong Workspace
+    -- Quét toàn bộ Workspace
     for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("Model") and IsValidTarget(obj) then
-            local targetPos = self:GetTargetPos(obj)
-            if targetPos then
-                local dist = (targetPos - playerPos).Magnitude
+        if obj:IsA("Model") and self:IsValidTarget(obj) then
+            local objRoot = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+            if objRoot then
+                local dist = (objRoot.Position - myPos).Magnitude
                 if dist <= range then
-                    table.insert(results, {model = obj, distance = dist, pos = targetPos})
+                    table.insert(targets, {model = obj, distance = dist, root = objRoot})
                 end
             end
         end
     end
 
     -- Sắp xếp theo khoảng cách gần nhất
-    table.sort(results, function(a, b) return a.distance < b.distance end)
-    self._cache = results
-    return results
+    table.sort(targets, function(a, b) return a.distance < b.distance end)
+    self._cache = targets
+    return targets
 end
 
 -- Lấy mục tiêu gần nhất
 function TargetScanner:GetNearest()
-    local targets = self:Scan()
-    return targets[1] and targets[1].model or nil
+    local targets = self:GetTargets()
+    return targets[1]
 end
+
+local Scanner = TargetScanner.new()
 
 -- ============================================================
 -- MODULE: CombatEngine
--- Xử lý các tính năng combat: TeleDron, TeleKill, Aimbot, v.v.
+-- Tele Dron, Hitbox, Tele Kill, Aimbot, All Mod Im, v.v.
 -- ============================================================
 local CombatEngine = {}
-CombatEngine._connections  = {}
-CombatEngine._lockedTarget = nil
-CombatEngine._runLoops     = {}
+CombatEngine._connections = {}  -- Lưu các kết nối sự kiện
+CombatEngine._currentTarget = nil
+CombatEngine._barrierParts = {}
 
--- Dừng tất cả loop của một tính năng
-local function StopLoop(name)
-    if CombatEngine._runLoops[name] then
-        CombatEngine._runLoops[name] = false
-    end
-end
-
--- Dọn dẹp connection khi tắt tính năng
-local function CleanupConnection(name)
-    if CombatEngine._connections[name] then
-        CombatEngine._connections[name]:Disconnect()
-        CombatEngine._connections[name] = nil
-    end
-end
-
---[[ 
-    AttackHook: HÀM CẮM CƠ CHẾ TẤN CÔNG CỦA GAME
-    
-    target = Model của mục tiêu
-    mode   = string mô tả chế độ ("telekill", "teleDron", v.v.)
-    
-    CÁCH TÍCH HỢP:
-    - Tìm RemoteEvent tấn công của game (ví dụ: game.ReplicatedStorage.Attack)
-    - Hoặc kích hoạt Tool đang cầm: LocalPlayer.Character:FindFirstChildOfClass("Tool"):Activate()
-    - Hoặc gọi hàm bắn tùy game
-    
-    Ví dụ tích hợp:
-    local attackRemote = game.ReplicatedStorage:FindFirstChild("AttackEvent")
-    if attackRemote then
-        attackRemote:FireServer(target, mode)
-    end
-]]
+-- Hàm hook tấn công - THAY THẾ NỘI DUNG NÀY theo game cụ thể
+-- mode: "melee" | "ranged" | "skill"
 function CombatEngine.AttackHook(target, mode)
-    -- === THAY THẾ NỘI DUNG NÀY BẰNG CƠ CHẾ TẤN CÔNG CỦA GAME ===
-    -- Mặc định: kích hoạt tool đang cầm nếu có
-    local char = GetCharacter()
-    if char then
+    if not target or not target.root then return end
+    --[[
+        TODO: Thay thế bằng remote/function tấn công thực tế của game, ví dụ:
+        
+        -- Ví dụ 1: FireServer remote attack
+        local Remote = game.ReplicatedStorage:FindFirstChild("AttackRemote")
+        if Remote then Remote:FireServer(target.model, mode) end
+        
+        -- Ví dụ 2: Dùng Tool/đòn đánh của nhân vật
+        local char = LocalPlayer.Character
         local tool = char:FindFirstChildOfClass("Tool")
-        if tool and tool.Activated then
-            -- tool:Activate() -- Bỏ comment nếu game dùng tool chuẩn
+        if tool and tool:FindFirstChild("Handle") then
+            -- kích hoạt tấn công
+        end
+    ]]
+    -- Debug: in ra console để kiểm tra
+    -- print("[CombatEngine] Attack:", target.model.Name, "mode:", mode)
+end
+
+-- Dọn kết nối an toàn
+local function disconnectAll(tbl)
+    for k, conn in pairs(tbl) do
+        if conn and typeof(conn) == "RBXScriptConnection" then
+            pcall(function() conn:Disconnect() end)
+        end
+        tbl[k] = nil
+    end
+end
+
+-- ---- Tele Dron ----
+function CombatEngine.StartTeleDron()
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("TeleDron") then return end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local nearest = Scanner:GetNearest()
+        if not nearest then return end
+
+        -- Tính vị trí lơ lửng trên mob
+        local safeHeight = State.Config.DroneHeightOffset
+        local targetPos = nearest.root.Position + Vector3.new(0, safeHeight, 0)
+
+        -- Dịch chuyển nhân vật tới vị trí drone
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            -- Triệt tiêu rơi: đặt Velocity = 0
+            pcall(function()
+                local hrp = root
+                local vel = hrp:FindFirstChildOfClass("LinearVelocity")
+                    or Instance.new("LinearVelocity", hrp)
+                vel.Name = "DroneLock"
+                vel.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+                vel.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+                vel.RelativeTo = Enum.ActuatorRelativeTo.World
+                vel.ForceLimitsEnabled = false
+            end)
+            -- Dịch chuyển nhân vật
+            root.CFrame = CFrame.new(targetPos)
+        end
+
+        -- Kích hoạt tấn công hướng xuống
+        CombatEngine.AttackHook(nearest, "melee")
+
+        -- Chuyển mục tiêu nếu mob chết
+        local hTarget = nearest.model:FindFirstChildOfClass("Humanoid")
+        if hTarget and hTarget.Health <= 0 then
+            Scanner._lastScanTick = 0 -- Force rescan
+        end
+    end)
+    CombatEngine._connections["TeleDron"] = conn
+end
+
+function CombatEngine.StopTeleDron()
+    if CombatEngine._connections["TeleDron"] then
+        pcall(function() CombatEngine._connections["TeleDron"]:Disconnect() end)
+        CombatEngine._connections["TeleDron"] = nil
+    end
+    -- Dọn LinearVelocity nếu còn
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        local vel = root:FindFirstChild("DroneLock")
+        if vel then vel:Destroy() end
+    end
+end
+
+-- ---- Hitbox All Mod ----
+local _hitboxOriginals = {} -- {part => {Size=, CFrame=}}
+
+function CombatEngine.StartHitboxAllMod()
+    local targets = Scanner:GetTargets()
+    for _, t in ipairs(targets) do
+        for _, part in ipairs(t.model:GetDescendants()) do
+            if part:IsA("BasePart") then
+                _hitboxOriginals[part] = {Size = part.Size, CFrame = part.CFrame}
+                pcall(function()
+                    local size = State.Config.HitboxSize
+                    part.Size = Vector3.new(size, size, size)
+                    part.CanCollide = false -- Xuyên vật cản
+                    part.CFrame = part.CFrame -- giữ nguyên vị trí
+                end)
+            end
         end
     end
-    -- Ghi log để debug
-    -- print("[AttackHook] Target:", target.Name, "Mode:", mode)
+    -- Cập nhật liên tục theo frame khi có mob mới
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("HitboxAllMod") then return end
+        local newTargets = Scanner:GetTargets()
+        for _, t in ipairs(newTargets) do
+            for _, part in ipairs(t.model:GetDescendants()) do
+                if part:IsA("BasePart") and not _hitboxOriginals[part] then
+                    _hitboxOriginals[part] = {Size = part.Size}
+                    pcall(function()
+                        local size = State.Config.HitboxSize
+                        part.Size = Vector3.new(size, size, size)
+                        part.CanCollide = false
+                    end)
+                end
+            end
+        end
+    end)
+    CombatEngine._connections["HitboxAllMod"] = conn
 end
 
--- Khóa mục tiêu và tự chuyển khi mục tiêu chết/mất
-function CombatEngine:LockTarget(model)
-    self._lockedTarget = model
-    -- Theo dõi khi mục tiêu chết hoặc bị xóa
-    CleanupConnection("lockWatch")
-    if model then
-        local hum = model:FindFirstChildOfClass("Humanoid")
-        if hum then
-            self._connections["lockWatch"] = hum.Died:Connect(function()
-                self._lockedTarget = nil
+function CombatEngine.StopHitboxAllMod()
+    if CombatEngine._connections["HitboxAllMod"] then
+        pcall(function() CombatEngine._connections["HitboxAllMod"]:Disconnect() end)
+        CombatEngine._connections["HitboxAllMod"] = nil
+    end
+    -- Khôi phục kích thước gốc
+    for part, orig in pairs(_hitboxOriginals) do
+        pcall(function()
+            if part and part.Parent then
+                part.Size = orig.Size
+                part.CanCollide = true
+            end
+        end)
+    end
+    _hitboxOriginals = {}
+end
+
+-- ---- Tele Kill ----
+function CombatEngine.StartTeleKill()
+    local running = true
+    task.spawn(function()
+        while running and State:IsOn("TeleKill") do
+            local nearest = Scanner:GetNearest()
+            if nearest then
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if root then
+                    -- Dịch chuyển tới sát bên mục tiêu
+                    local offset = Vector3.new(2, 0, 2)
+                    root.CFrame = CFrame.new(nearest.root.Position + offset)
+                    task.wait(0.05)
+                    CombatEngine.AttackHook(nearest, "melee")
+                    -- Chờ mob chết hoặc tiếp tục
+                    task.wait(0.3)
+                end
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+    -- Lưu cờ để dừng
+    CombatEngine._connections["TeleKill"] = {
+        Disconnect = function() running = false end
+    }
+end
+
+function CombatEngine.StopTeleKill()
+    if CombatEngine._connections["TeleKill"] then
+        pcall(function() CombatEngine._connections["TeleKill"]:Disconnect() end)
+        CombatEngine._connections["TeleKill"] = nil
+    end
+end
+
+-- ---- Aimbot ----
+function CombatEngine.StartAimbot()
+    local conn = RunService.RenderStepped:Connect(function()
+        if not State:IsOn("Aimbot") then return end
+        local nearest = Scanner:GetNearest()
+        if not nearest then return end
+        local cam = Workspace.CurrentCamera
+        -- Tính hướng từ camera tới mục tiêu
+        local targetPos = nearest.root.Position
+        local camPos = cam.CFrame.Position
+        -- Ghim camera mượt mà bằng Tween nhỏ
+        local lookCF = CFrame.new(camPos, targetPos)
+        cam.CFrame = cam.CFrame:Lerp(lookCF, 0.2)
+    end)
+    CombatEngine._connections["Aimbot"] = conn
+end
+
+function CombatEngine.StopAimbot()
+    if CombatEngine._connections["Aimbot"] then
+        pcall(function() CombatEngine._connections["Aimbot"]:Disconnect() end)
+        CombatEngine._connections["Aimbot"] = nil
+    end
+end
+
+-- ---- All Mod Im (Freeze + vô hiệu tấn công) ----
+local _modImOriginals = {} -- {humanoid => {WalkSpeed=, JumpPower=, ...}}
+
+function CombatEngine.StartAllModIm()
+    local targets = Scanner:GetTargets()
+    for _, t in ipairs(targets) do
+        local hum = t.model:FindFirstChildOfClass("Humanoid")
+        if hum and not _modImOriginals[hum] then
+            _modImOriginals[hum] = {
+                WalkSpeed = hum.WalkSpeed,
+                JumpPower = hum.JumpPower,
+            }
+            pcall(function()
+                hum.WalkSpeed = 0
+                hum.JumpPower = 0
+            end)
+        end
+        -- Vô hiệu tấn công tầm xa: dịch xuống đất
+        for _, part in ipairs(t.model:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                pcall(function() part.CanCollide = false end)
+            end
+        end
+    end
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("AllModIm") then return end
+        local newTargets = Scanner:GetTargets()
+        for _, t in ipairs(newTargets) do
+            local hum = t.model:FindFirstChildOfClass("Humanoid")
+            if hum and not _modImOriginals[hum] then
+                _modImOriginals[hum] = {WalkSpeed = hum.WalkSpeed, JumpPower = hum.JumpPower}
+                pcall(function() hum.WalkSpeed = 0; hum.JumpPower = 0 end)
+            end
+        end
+    end)
+    CombatEngine._connections["AllModIm"] = conn
+end
+
+function CombatEngine.StopAllModIm()
+    if CombatEngine._connections["AllModIm"] then
+        pcall(function() CombatEngine._connections["AllModIm"]:Disconnect() end)
+        CombatEngine._connections["AllModIm"] = nil
+    end
+    for hum, orig in pairs(_modImOriginals) do
+        pcall(function()
+            if hum and hum.Parent then
+                hum.WalkSpeed = orig.WalkSpeed
+                hum.JumpPower = orig.JumpPower
+            end
+        end)
+    end
+    _modImOriginals = {}
+end
+
+-- ---- Model Độn Thổ ----
+local _donThoOriginals = {}
+
+function CombatEngine.StartModelDonTho()
+    local depth = State.Config.DonThoDepth
+    local targets = Scanner:GetTargets()
+    for _, t in ipairs(targets) do
+        local root = t.root
+        if root and not _donThoOriginals[root] then
+            _donThoOriginals[root] = root.CFrame
+            pcall(function()
+                -- Dịch toàn model xuống dưới lòng đất
+                local offset = Vector3.new(0, depth, 0)
+                local pivotCF = t.model:GetPivot()
+                t.model:PivotTo(pivotCF + offset)
+                -- Vô hiệu va chạm
+                for _, p in ipairs(t.model:GetDescendants()) do
+                    if p:IsA("BasePart") then p.CanCollide = false end
+                end
             end)
         end
     end
-end
-
-function CombatEngine:GetLockedTarget()
-    -- Kiểm tra mục tiêu còn hợp lệ không
-    local t = self._lockedTarget
-    if t and (not t.Parent or not IsValidTarget(t)) then
-        self._lockedTarget = nil
-        return nil
-    end
-    return t
-end
-
--- ==========================================
--- TELE DRON
--- Lơ lửng phía trên mục tiêu và tấn công xuống
--- ==========================================
-function CombatEngine:StartTeleDron()
-    StopLoop("teleDron")
-    self._runLoops["teleDron"] = true
-
-    local safeHeight = StateManager:GetConfig("TeleDronSafeHeight")
-
-    task.spawn(function()
-        while self._runLoops["teleDron"] and StateManager:IsOn("TeleDron") do
-            local char = GetCharacter()
-            local root = GetRoot()
-            local hum  = GetHumanoid()
-            if char and root and hum then
-                -- Lấy mục tiêu gần nhất hoặc mục tiêu đã khóa
-                local target = self:GetLockedTarget() or TargetScanner:GetNearest()
-                if target then
-                    self:LockTarget(target)
-                    local targetPos = TargetScanner:GetTargetPos(target)
-                    if targetPos then
-                        local dronePos = targetPos + Vector3.new(0, safeHeight, 0)
-                        -- Dịch chuyển nhân vật tới vị trí drone
-                        root.CFrame = CFrame.new(dronePos)
-                        -- Triệt tiêu trọng lực bằng cách liên tục reset velocity
-                        local bodyVelocity = root:FindFirstChild("_DronBV")
-                        if not bodyVelocity then
-                            bodyVelocity = Instance.new("BodyVelocity")
-                            bodyVelocity.Name = "_DronBV"
-                            bodyVelocity.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-                            bodyVelocity.Parent = root
-                        end
-                        bodyVelocity.Velocity = Vector3.zero
-                        -- Kích hoạt tấn công hướng xuống
-                        self.AttackHook(target, "teleDron")
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("ModelDonTho") then return end
+        local newT = Scanner:GetTargets()
+        for _, t in ipairs(newT) do
+            local root = t.root
+            if root and not _donThoOriginals[root] then
+                _donThoOriginals[root] = root.CFrame
+                local offset = Vector3.new(0, State.Config.DonThoDepth, 0)
+                pcall(function()
+                    local pivotCF = t.model:GetPivot()
+                    t.model:PivotTo(pivotCF + offset)
+                    for _, p in ipairs(t.model:GetDescendants()) do
+                        if p:IsA("BasePart") then p.CanCollide = false end
                     end
-                else
-                    -- Không có mục tiêu: xóa BodyVelocity nếu có
-                    local bv = root:FindFirstChild("_DronBV")
-                    if bv then bv:Destroy() end
-                end
-            end
-            task.wait(0.1)
-        end
-        -- Dọn dẹp khi tắt
-        local root = GetRoot()
-        if root then
-            local bv = root:FindFirstChild("_DronBV")
-            if bv then bv:Destroy() end
-        end
-    end)
-end
-
-function CombatEngine:StopTeleDron()
-    StopLoop("teleDron")
-    local root = GetRoot()
-    if root then
-        local bv = root:FindFirstChild("_DronBV")
-        if bv then bv:Destroy() end
-    end
-end
-
--- ==========================================
--- HITBOX ALL MOD
--- Tăng kích thước hitbox của tất cả NPC/Mob
--- ==========================================
-function CombatEngine:StartHitboxAllMod()
-    StopLoop("hitbox")
-    self._runLoops["hitbox"] = true
-    local hitboxSize = StateManager:GetConfig("HitboxSize")
-
-    task.spawn(function()
-        while self._runLoops["hitbox"] and StateManager:IsOn("HitboxAllMod") do
-            local targets = TargetScanner:Scan()
-            for _, t in ipairs(targets) do
-                local model = t.model
-                -- Phóng to tất cả BasePart của model
-                for _, part in ipairs(model:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        -- Lưu kích thước gốc nếu chưa lưu
-                        if not part:FindFirstChild("_OrigSize") then
-                            local tag = Instance.new("Vector3Value")
-                            tag.Name  = "_OrigSize"
-                            tag.Value = part.Size
-                            tag.Parent = part
-                        end
-                        -- Phóng to hitbox
-                        part.Size = hitboxSize
-                        -- Cho phép xuyên tường và dưới đất
-                        part.CanCollide = false
-                    end
-                end
-            end
-            task.wait(0.2)
-        end
-        -- Khôi phục kích thước gốc khi tắt
-        for _, t in ipairs(TargetScanner:Scan()) do
-            for _, part in ipairs(t.model:GetDescendants()) do
-                local origSize = part:FindFirstChild("_OrigSize")
-                if origSize then
-                    part.Size = origSize.Value
-                    part.CanCollide = true
-                    origSize:Destroy()
-                end
+                end)
             end
         end
     end)
+    CombatEngine._connections["ModelDonTho"] = conn
 end
 
-function CombatEngine:StopHitboxAllMod()
-    StopLoop("hitbox")
-    -- Khôi phục ngay khi tắt
-    for _, t in ipairs(TargetScanner._cache) do
-        if t.model and t.model.Parent then
-            for _, part in ipairs(t.model:GetDescendants()) do
-                local origSize = part:FindFirstChild("_OrigSize")
-                if origSize then
-                    part.Size = origSize.Value
-                    part.CanCollide = true
-                    origSize:Destroy()
+function CombatEngine.StopModelDonTho()
+    if CombatEngine._connections["ModelDonTho"] then
+        pcall(function() CombatEngine._connections["ModelDonTho"]:Disconnect() end)
+        CombatEngine._connections["ModelDonTho"] = nil
+    end
+    for root, origCF in pairs(_donThoOriginals) do
+        pcall(function()
+            if root and root.Parent then
+                local model = root:FindFirstAncestorOfClass("Model")
+                if model then
+                    model:PivotTo(origCF)
+                    for _, p in ipairs(model:GetDescendants()) do
+                        if p:IsA("BasePart") then p.CanCollide = true end
+                    end
                 end
             end
+        end)
+    end
+    _donThoOriginals = {}
+end
+
+-- ---- Model Head Down ----
+local _headDownOriginals = {}
+
+function CombatEngine.StartModelHeadDown()
+    local targets = Scanner:GetTargets()
+    for _, t in ipairs(targets) do
+        local head = t.model:FindFirstChild("Head")
+        local root = t.root
+        if head and root and not _headDownOriginals[root] then
+            _headDownOriginals[root] = {
+                headCF = head.CFrame,
+                rootCF = root.CFrame,
+            }
+            pcall(function()
+                -- Cắm đầu xuống đất, giữ thân lên trên
+                local depth = State.Config.HeadDownDepth
+                -- Lật ngược model (đầu xuống)
+                local pivotCF = t.model:GetPivot()
+                t.model:PivotTo(CFrame.new(pivotCF.Position)
+                    * CFrame.Angles(math.pi, 0, 0)
+                    + Vector3.new(0, depth, 0))
+                for _, p in ipairs(t.model:GetDescendants()) do
+                    if p:IsA("BasePart") then p.CanCollide = false end
+                end
+            end)
         end
     end
-end
-
--- ==========================================
--- TELE KILL
--- Dịch chuyển tới mob và tấn công liên tục
--- ==========================================
-function CombatEngine:StartTeleKill()
-    StopLoop("teleKill")
-    self._runLoops["teleKill"] = true
-
-    task.spawn(function()
-        while self._runLoops["teleKill"] and StateManager:IsOn("TeleKill") do
-            local root = GetRoot()
-            if root then
-                local target = self:GetLockedTarget() or TargetScanner:GetNearest()
-                if target then
-                    self:LockTarget(target)
-                    local targetPos = TargetScanner:GetTargetPos(target)
-                    if targetPos then
-                        -- Dịch chuyển tới vị trí tối ưu (cách mục tiêu 2 studs)
-                        local offset = Vector3.new(2, 0, 0)
-                        root.CFrame = CFrame.new(targetPos + offset)
-                        -- Kích hoạt tấn công
-                        self.AttackHook(target, "teleKill")
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("ModelHeadDown") then return end
+        local newT = Scanner:GetTargets()
+        for _, t in ipairs(newT) do
+            local root = t.root
+            if root and not _headDownOriginals[root] then
+                _headDownOriginals[root] = {rootCF = root.CFrame}
+                local depth = State.Config.HeadDownDepth
+                pcall(function()
+                    local pivotCF = t.model:GetPivot()
+                    t.model:PivotTo(CFrame.new(pivotCF.Position)
+                        * CFrame.Angles(math.pi, 0, 0)
+                        + Vector3.new(0, depth, 0))
+                    for _, p in ipairs(t.model:GetDescendants()) do
+                        if p:IsA("BasePart") then p.CanCollide = false end
                     end
-                else
-                    -- Không còn mục tiêu: tìm mục tiêu mới
-                    self._lockedTarget = nil
-                end
-            end
-            task.wait(0.15)
-        end
-    end)
-end
-
-function CombatEngine:StopTeleKill()
-    StopLoop("teleKill")
-    self._lockedTarget = nil
-end
-
--- ==========================================
--- AIMBOT
--- Khóa camera vào mục tiêu mượt mà
--- ==========================================
-function CombatEngine:StartAimbot()
-    CleanupConnection("aimbot")
-    self._connections["aimbot"] = RunService.RenderStepped:Connect(function()
-        if not StateManager:IsOn("Aimbot") then return end
-        local target = self:GetLockedTarget() or TargetScanner:GetNearest()
-        if target then
-            self:LockTarget(target)
-            local targetPos = TargetScanner:GetTargetPos(target)
-            if targetPos then
-                local root = GetRoot()
-                if root then
-                    -- Hướng camera mượt mà về phía mục tiêu
-                    local direction = (targetPos - Camera.CFrame.Position).Unit
-                    local targetCF  = CFrame.lookAt(Camera.CFrame.Position, targetPos)
-                    -- Tween mượt mà để chống rung
-                    Camera.CFrame = Camera.CFrame:Lerp(targetCF, 0.15)
-                end
+                end)
             end
         end
     end)
+    CombatEngine._connections["ModelHeadDown"] = conn
 end
 
-function CombatEngine:StopAimbot()
-    CleanupConnection("aimbot")
-    Camera.CameraType = Enum.CameraType.Custom
-end
-
--- ==========================================
--- ALL MOD IM (Immobilize All Mods)
--- Làm tất cả mod đứng yên và không tấn công
--- ==========================================
-function CombatEngine:StartAllModIm()
-    StopLoop("allModIm")
-    self._runLoops["allModIm"] = true
-
-    task.spawn(function()
-        while self._runLoops["allModIm"] and StateManager:IsOn("AllModIm") do
-            local targets = TargetScanner:Scan()
-            for _, t in ipairs(targets) do
-                local model = t.model
-                local hum   = model:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    -- Đặt WalkSpeed và JumpPower về 0 để không di chuyển
-                    if not model:FindFirstChild("_ImOrig") then
-                        local tag = Instance.new("NumberValue")
-                        tag.Name   = "_ImOrig"
-                        tag.Value  = hum.WalkSpeed
-                        tag.Parent = model
-                    end
-                    hum.WalkSpeed  = 0
-                    hum.JumpPower  = 0
-                    hum.AutoRotate = false
-                    -- Với mob tầm xa: hướng tấn công xuống đất
-                    local root = model:FindFirstChild("HumanoidRootPart")
-                    if root then
-                        root.CFrame = CFrame.new(root.Position) * CFrame.Angles(math.rad(90), 0, 0)
-                    end
-                end
-            end
-            task.wait(0.3)
-        end
-        -- Khôi phục khi tắt
-        for _, t in ipairs(TargetScanner._cache) do
-            if t.model and t.model.Parent then
-                local hum  = t.model:FindFirstChildOfClass("Humanoid")
-                local orig = t.model:FindFirstChild("_ImOrig")
-                if hum and orig then
-                    hum.WalkSpeed  = orig.Value
-                    hum.JumpPower  = 50
-                    hum.AutoRotate = true
-                    orig:Destroy()
-                end
-            end
-        end
-    end)
-end
-
-function CombatEngine:StopAllModIm()
-    StopLoop("allModIm")
-    for _, t in ipairs(TargetScanner._cache) do
-        if t.model and t.model.Parent then
-            local hum  = t.model:FindFirstChildOfClass("Humanoid")
-            local orig = t.model:FindFirstChild("_ImOrig")
-            if hum and orig then
-                hum.WalkSpeed  = orig.Value
-                hum.JumpPower  = 50
-                hum.AutoRotate = true
-                orig:Destroy()
-            end
-        end
+function CombatEngine.StopModelHeadDown()
+    if CombatEngine._connections["ModelHeadDown"] then
+        pcall(function() CombatEngine._connections["ModelHeadDown"]:Disconnect() end)
+        CombatEngine._connections["ModelHeadDown"] = nil
     end
-end
-
--- ==========================================
--- MODEL ĐỘN THỔ (Chôn mod xuống đất)
--- ==========================================
-function CombatEngine:StartModelBury()
-    StopLoop("modelBury")
-    self._runLoops["modelBury"] = true
-    local depth = StateManager:GetConfig("ModelBuryDepth")
-
-    task.spawn(function()
-        while self._runLoops["modelBury"] and StateManager:IsOn("ModelBury") do
-            local targets = TargetScanner:Scan()
-            for _, t in ipairs(targets) do
-                local model = t.model
-                local root  = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-                if root then
-                    -- Lưu vị trí gốc
-                    if not model:FindFirstChild("_BuryOrig") then
-                        local tag = Instance.new("Vector3Value")
-                        tag.Name   = "_BuryOrig"
-                        tag.Value  = root.Position
-                        tag.Parent = model
-                    end
-                    -- Chôn xuống đất
-                    local newY  = root.Position.Y + depth
-                    root.CFrame = CFrame.new(root.Position.X, newY, root.Position.Z)
-                    -- Vô hiệu hóa tấn công
-                    local hum = model:FindFirstChildOfClass("Humanoid")
-                    if hum then hum.WalkSpeed = 0 end
-                end
-            end
-            task.wait(0.2)
-        end
-        -- Khôi phục
-        for _, t in ipairs(TargetScanner._cache) do
-            if t.model and t.model.Parent then
-                local root = t.model:FindFirstChild("HumanoidRootPart") or t.model.PrimaryPart
-                local orig = t.model:FindFirstChild("_BuryOrig")
-                if root and orig then
-                    root.CFrame = CFrame.new(orig.Value)
-                    orig:Destroy()
-                end
-                local hum = t.model:FindFirstChildOfClass("Humanoid")
-                if hum then hum.WalkSpeed = 16 end
-            end
-        end
-    end)
-end
-
-function CombatEngine:StopModelBury()
-    StopLoop("modelBury")
-end
-
--- ==========================================
--- MODEL HEAD DOWN (Cắm đầu vào đất)
--- ==========================================
-function CombatEngine:StartModelHeadDown()
-    StopLoop("modelHeadDown")
-    self._runLoops["modelHeadDown"] = true
-    local depth = StateManager:GetConfig("ModelHeadDepth")
-
-    task.spawn(function()
-        while self._runLoops["modelHeadDown"] and StateManager:IsOn("ModelHeadDown") do
-            local targets = TargetScanner:Scan()
-            for _, t in ipairs(targets) do
-                local model = t.model
-                local root  = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-                if root then
-                    -- Lật ngược model (đầu xuống đất)
-                    local pos   = root.Position
-                    root.CFrame = CFrame.new(pos) * CFrame.Angles(math.pi, 0, 0)
-                    root.CFrame = CFrame.new(pos.X, pos.Y + depth, pos.Z) * CFrame.Angles(math.pi, 0, 0)
-                    -- Vô hiệu hóa tấn công và không cho bay lên
-                    local hum = model:FindFirstChildOfClass("Humanoid")
-                    if hum then
-                        hum.WalkSpeed = 0
-                        hum.JumpPower = 0
+    for root, orig in pairs(_headDownOriginals) do
+        pcall(function()
+            if root and root.Parent then
+                local model = root:FindFirstAncestorOfClass("Model")
+                if model then
+                    model:PivotTo(orig.rootCF)
+                    for _, p in ipairs(model:GetDescendants()) do
+                        if p:IsA("BasePart") then p.CanCollide = true end
                     end
                 end
             end
-            task.wait(0.2)
-        end
-        -- Khôi phục
-        for _, t in ipairs(TargetScanner._cache) do
-            if t.model and t.model.Parent then
-                local root = t.model:FindFirstChild("HumanoidRootPart") or t.model.PrimaryPart
-                if root then
-                    root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, 0, 0)
-                end
-                local hum = t.model:FindFirstChildOfClass("Humanoid")
-                if hum then
-                    hum.WalkSpeed = 16
-                    hum.JumpPower = 50
-                end
-            end
-        end
-    end)
+        end)
+    end
+    _headDownOriginals = {}
 end
 
-function CombatEngine:StopModelHeadDown()
-    StopLoop("modelHeadDown")
-end
-
--- ==========================================
--- PLAYER BARRIER (Rào chắn vô hình)
--- ==========================================
-function CombatEngine:StartPlayerBarrier()
-    -- Xóa barrier cũ nếu có
-    self:StopPlayerBarrier()
-    local root = GetRoot()
+-- ---- Player Barrier ----
+function CombatEngine.StartPlayerBarrier()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
 
-    local barrierSize = StateManager:GetConfig("PlayerBarrierSize")
-    -- Tạo barrier là một part trong suốt bao quanh người chơi
+    -- Tạo Part rào chắn vô hình
     local barrier = Instance.new("Part")
-    barrier.Name         = "_PlayerBarrier"
-    barrier.Size         = Vector3.new(barrierSize, barrierSize, barrierSize)
-    barrier.Transparency = 0.8
-    barrier.CanCollide   = true
-    barrier.Anchored     = false
-    barrier.Material     = Enum.Material.ForceField
-    barrier.BrickColor   = BrickColor.new("Bright blue")
-    barrier.Parent       = Workspace
+    barrier.Name = "PlayerBarrier"
+    barrier.Size = Vector3.new(
+        State.Config.BarrierSize,
+        State.Config.BarrierSize,
+        State.Config.BarrierSize
+    )
+    barrier.Anchored = false
+    barrier.CanCollide = true
+    barrier.Transparency = 1  -- Vô hình
+    barrier.CastShadow = false
+    barrier.Material = Enum.Material.SmoothPlastic
+    barrier.Parent = char
 
-    -- Weld barrier vào nhân vật
+    -- Weld rào chắn vào nhân vật
     local weld = Instance.new("WeldConstraint")
     weld.Part0 = root
     weld.Part1 = barrier
     weld.Parent = barrier
 
-    self._barrierPart = barrier
+    -- Thêm CollisionGroup xử lý chặn mob
+    -- (nếu game có CollisionGroup setup sẵn thì set ở đây)
+    table.insert(CombatEngine._barrierParts, barrier)
 
-    -- Liên kết barrier với root
-    CleanupConnection("barrierUpdate")
-    self._connections["barrierUpdate"] = RunService.Heartbeat:Connect(function()
+    -- Cập nhật kích thước theo config
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("PlayerBarrier") then return end
         if barrier and barrier.Parent then
-            barrier.CFrame = root.CFrame
+            local s = State.Config.BarrierSize
+            barrier.Size = Vector3.new(s, s, s)
         end
     end)
+    CombatEngine._connections["PlayerBarrier"] = conn
 end
 
-function CombatEngine:StopPlayerBarrier()
-    CleanupConnection("barrierUpdate")
-    if self._barrierPart and self._barrierPart.Parent then
-        self._barrierPart:Destroy()
-        self._barrierPart = nil
+function CombatEngine.StopPlayerBarrier()
+    if CombatEngine._connections["PlayerBarrier"] then
+        pcall(function() CombatEngine._connections["PlayerBarrier"]:Disconnect() end)
+        CombatEngine._connections["PlayerBarrier"] = nil
     end
+    for _, part in ipairs(CombatEngine._barrierParts) do
+        pcall(function() if part and part.Parent then part:Destroy() end end)
+    end
+    CombatEngine._barrierParts = {}
 end
 
--- ==========================================
--- LONG LEGS (Chân dài xuống lòng đất)
--- ==========================================
-function CombatEngine:StartLongLegs()
-    StopLoop("longLegs")
-    self._runLoops["longLegs"] = true
-    local depth = StateManager:GetConfig("LongLegsDepth")
+-- ---- Long Legs ----
+local _longLegsOriginals = {}
 
-    task.spawn(function()
-        while self._runLoops["longLegs"] and StateManager:IsOn("LongLegs") do
-            local targets = TargetScanner:Scan()
-            for _, t in ipairs(targets) do
-                local model = t.model
-                -- Kéo dài chân (LeftLeg, RightLeg hoặc LowerTorso)
-                for _, limb in ipairs({"LeftLeg", "RightLeg", "LeftLowerLeg", "RightLowerLeg"}) do
-                    local part = model:FindFirstChild(limb)
-                    if part and part:IsA("BasePart") then
-                        if not part:FindFirstChild("_LLOrig") then
-                            local tag = Instance.new("Vector3Value")
-                            tag.Name   = "_LLOrig"
-                            tag.Value  = part.Size
-                            tag.Parent = part
-                        end
-                        -- Kéo dài chân xuống
-                        part.Size = Vector3.new(part.Size.X, math.abs(depth), part.Size.Z)
-                        part.CFrame = CFrame.new(part.Position.X, part.Position.Y + depth/2, part.Position.Z)
-                        part.CanCollide = true
-                    end
-                end
-            end
-            task.wait(0.3)
-        end
-        -- Khôi phục
-        for _, t in ipairs(TargetScanner._cache) do
-            if t.model and t.model.Parent then
-                for _, limb in ipairs({"LeftLeg", "RightLeg", "LeftLowerLeg", "RightLowerLeg"}) do
-                    local part = t.model:FindFirstChild(limb)
-                    if part then
-                        local orig = part:FindFirstChild("_LLOrig")
-                        if orig then
-                            part.Size = orig.Value
-                            orig:Destroy()
-                        end
-                    end
+function CombatEngine.StartLongLegs()
+    local targets = Scanner:GetTargets()
+    local function applyLongLegs(t)
+        for _, part in ipairs(t.model:GetDescendants()) do
+            if part:IsA("BasePart") and
+                (part.Name:lower():find("leg") or part.Name:lower():find("foot")) then
+                if not _longLegsOriginals[part] then
+                    _longLegsOriginals[part] = {Size = part.Size, CFrame = part.CFrame}
+                    pcall(function()
+                        local depth = math.abs(State.Config.LongLegsDepth)
+                        part.Size = Vector3.new(part.Size.X, depth, part.Size.Z)
+                        -- Dịch xuống để chân thò xuống đất
+                        part.CFrame = part.CFrame + Vector3.new(0, -depth/2, 0)
+                    end)
                 end
             end
         end
+    end
+    for _, t in ipairs(targets) do applyLongLegs(t) end
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("LongLegs") then return end
+        for _, t in ipairs(Scanner:GetTargets()) do applyLongLegs(t) end
     end)
+    CombatEngine._connections["LongLegs"] = conn
 end
 
-function CombatEngine:StopLongLegs()
-    StopLoop("longLegs")
+function CombatEngine.StopLongLegs()
+    if CombatEngine._connections["LongLegs"] then
+        pcall(function() CombatEngine._connections["LongLegs"]:Disconnect() end)
+        CombatEngine._connections["LongLegs"] = nil
+    end
+    for part, orig in pairs(_longLegsOriginals) do
+        pcall(function()
+            if part and part.Parent then
+                part.Size = orig.Size
+                part.CFrame = orig.CFrame
+            end
+        end)
+    end
+    _longLegsOriginals = {}
 end
 
--- ==========================================
--- LONG HEAD (Đầu to dài lên trên)
--- ==========================================
-function CombatEngine:StartLongHead()
-    StopLoop("longHead")
-    self._runLoops["longHead"] = true
-    local headHeight = StateManager:GetConfig("LongHeadHeight")
+-- ---- Long Head ----
+local _longHeadOriginals = {}
 
-    task.spawn(function()
-        while self._runLoops["longHead"] and StateManager:IsOn("LongHead") do
-            local targets = TargetScanner:Scan()
-            for _, t in ipairs(targets) do
-                local model = t.model
-                local head  = model:FindFirstChild("Head")
-                if head and head:IsA("BasePart") then
-                    if not head:FindFirstChild("_LHOrig") then
-                        local tag = Instance.new("Vector3Value")
-                        tag.Name   = "_LHOrig"
-                        tag.Value  = head.Size
-                        tag.Parent = head
-                    end
-                    head.Size   = Vector3.new(head.Size.X * 2, headHeight, head.Size.Z * 2)
-                end
-            end
-            task.wait(0.3)
+function CombatEngine.StartLongHead()
+    local targets = Scanner:GetTargets()
+    local function applyLongHead(t)
+        local head = t.model:FindFirstChild("Head")
+        if head and not _longHeadOriginals[head] then
+            _longHeadOriginals[head] = {Size = head.Size, CFrame = head.CFrame}
+            pcall(function()
+                local h = State.Config.LongHeadHeight
+                head.Size = Vector3.new(head.Size.X * 2, h, head.Size.Z * 2)
+                head.CFrame = head.CFrame + Vector3.new(0, h/2, 0)
+            end)
         end
-        for _, t in ipairs(TargetScanner._cache) do
-            if t.model and t.model.Parent then
-                local head = t.model:FindFirstChild("Head")
-                if head then
-                    local orig = head:FindFirstChild("_LHOrig")
-                    if orig then
-                        head.Size = orig.Value
-                        orig:Destroy()
-                    end
-                end
-            end
-        end
+    end
+    for _, t in ipairs(targets) do applyLongHead(t) end
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("LongHead") then return end
+        for _, t in ipairs(Scanner:GetTargets()) do applyLongHead(t) end
     end)
+    CombatEngine._connections["LongHead"] = conn
 end
 
-function CombatEngine:StopLongHead()
-    StopLoop("longHead")
+function CombatEngine.StopLongHead()
+    if CombatEngine._connections["LongHead"] then
+        pcall(function() CombatEngine._connections["LongHead"]:Disconnect() end)
+        CombatEngine._connections["LongHead"] = nil
+    end
+    for head, orig in pairs(_longHeadOriginals) do
+        pcall(function()
+            if head and head.Parent then
+                head.Size = orig.Size
+                head.CFrame = orig.CFrame
+            end
+        end)
+    end
+    _longHeadOriginals = {}
 end
 
 -- ============================================================
 -- MODULE: EspEngine
--- Vẽ ESP: Line, Box, Name, Distance, Hologram
+-- Esp Line, Box, Name, Distance, Hologram
 -- ============================================================
 local EspEngine = {}
-EspEngine._drawings    = {}  -- [model] = {line, box, nameLabel, distLabel}
-EspEngine._highlights  = {}  -- [model] = Highlight
+EspEngine._drawings = {}     -- {targetRoot => {line=, box=, name=, dist=}}
+EspEngine._highlights = {}   -- {model => Highlight}
 EspEngine._connections = {}
 
--- Tạo đối tượng vẽ 2D (dùng Drawing API nếu có, fallback sang ScreenGui)
-local function CreateDrawing(type_, props)
-    -- Thử dùng Drawing API (executor phổ biến như Synapse, KRNL)
-    local ok, drawing = pcall(function()
-        local d = Drawing.new(type_)
-        for k, v in pairs(props) do
-            d[k] = v
-        end
-        return d
-    end)
-    if ok then return drawing end
+-- Tạo Drawing object an toàn
+local function newDrawing(type)
+    local ok, obj = pcall(Drawing.new, type)
+    if ok then return obj end
     return nil
 end
 
--- Chuyển đổi vị trí 3D sang 2D màn hình
-local function WorldToScreen(worldPos)
-    local screenPos, onScreen = Camera:WorldToViewportPoint(worldPos)
+-- Lấy vị trí 2D từ 3D (World to Screen)
+local function worldToScreen(pos)
+    local cam = Workspace.CurrentCamera
+    local screenPos, onScreen = cam:WorldToViewportPoint(pos)
     return Vector2.new(screenPos.X, screenPos.Y), onScreen, screenPos.Z
 end
 
 -- Lấy bounding box 2D của model
-local function GetModelBounds2D(model)
-    local minX, minY =  math.huge,  math.huge
-    local maxX, maxY = -math.huge, -math.huge
-    local anyOnScreen = false
-
+local function getModelBounds2D(model)
+    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+    local onScreenAny = false
     for _, part in ipairs(model:GetDescendants()) do
         if part:IsA("BasePart") then
             local corners = {
-                part.Position + Vector3.new( part.Size.X/2,  part.Size.Y/2,  part.Size.Z/2),
-                part.Position + Vector3.new(-part.Size.X/2,  part.Size.Y/2,  part.Size.Z/2),
-                part.Position + Vector3.new( part.Size.X/2, -part.Size.Y/2,  part.Size.Z/2),
-                part.Position + Vector3.new( part.Size.X/2,  part.Size.Y/2, -part.Size.Z/2),
-                part.Position + Vector3.new(-part.Size.X/2, -part.Size.Y/2, -part.Size.Z/2),
+                part.CFrame * CFrame.new( part.Size.X/2,  part.Size.Y/2,  part.Size.Z/2),
+                part.CFrame * CFrame.new(-part.Size.X/2,  part.Size.Y/2,  part.Size.Z/2),
+                part.CFrame * CFrame.new( part.Size.X/2, -part.Size.Y/2,  part.Size.Z/2),
+                part.CFrame * CFrame.new(-part.Size.X/2, -part.Size.Y/2,  part.Size.Z/2),
+                part.CFrame * CFrame.new( part.Size.X/2,  part.Size.Y/2, -part.Size.Z/2),
+                part.CFrame * CFrame.new(-part.Size.X/2,  part.Size.Y/2, -part.Size.Z/2),
+                part.CFrame * CFrame.new( part.Size.X/2, -part.Size.Y/2, -part.Size.Z/2),
+                part.CFrame * CFrame.new(-part.Size.X/2, -part.Size.Y/2, -part.Size.Z/2),
             }
-            for _, corner in ipairs(corners) do
-                local screen, onScreen = WorldToScreen(corner)
+            for _, cf in ipairs(corners) do
+                local sp, onScreen = worldToScreen(cf.Position)
                 if onScreen then
-                    anyOnScreen = true
-                    minX = math.min(minX, screen.X)
-                    minY = math.min(minY, screen.Y)
-                    maxX = math.max(maxX, screen.X)
-                    maxY = math.max(maxY, screen.Y)
+                    onScreenAny = true
+                    if sp.X < minX then minX = sp.X end
+                    if sp.X > maxX then maxX = sp.X end
+                    if sp.Y < minY then minY = sp.Y end
+                    if sp.Y > maxY then maxY = sp.Y end
                 end
             end
         end
     end
-
-    return anyOnScreen, minX, minY, maxX, maxY
+    if not onScreenAny then return nil end
+    return minX, minY, maxX, maxY
 end
 
--- Dọn dẹp ESP của một mục tiêu cụ thể
-function EspEngine:CleanupTarget(model)
-    local d = self._drawings[model]
+-- Dọn dẹp drawings cho một mục tiêu
+local function cleanupTarget(key)
+    local d = EspEngine._drawings[key]
     if d then
-        if d.line   and d.line.Remove   then d.line:Remove()   end
-        if d.box    and d.box.Remove    then d.box:Remove()    end
-        if d.nameL  and d.nameL.Remove  then d.nameL:Remove()  end
-        if d.distL  and d.distL.Remove  then d.distL:Remove()  end
-        self._drawings[model] = nil
-    end
-    local h = self._highlights[model]
-    if h then
-        h:Destroy()
-        self._highlights[model] = nil
+        for _, obj in pairs(d) do
+            if obj and typeof(obj) == "Drawing" then
+                pcall(function() obj:Remove() end)
+            end
+        end
+        EspEngine._drawings[key] = nil
     end
 end
 
--- Dọn dẹp toàn bộ ESP
-function EspEngine:CleanupAll()
-    for model, _ in pairs(self._drawings) do
-        self:CleanupTarget(model)
+-- Dọn dẹp highlight cho một model
+local function cleanupHighlight(model)
+    local hl = EspEngine._highlights[model]
+    if hl then
+        pcall(function() hl:Destroy() end)
+        EspEngine._highlights[model] = nil
     end
-    for model, h in pairs(self._highlights) do
-        h:Destroy()
-    end
-    self._highlights = {}
-    self._drawings   = {}
-    for name, conn in pairs(self._connections) do
-        conn:Disconnect()
-    end
-    self._connections = {}
 end
 
--- Khởi động vòng lặp cập nhật ESP
-function EspEngine:StartLoop()
-    if self._connections["loop"] then return end
+-- Dọn tất cả ESP
+function EspEngine.CleanupAll()
+    for key, _ in pairs(EspEngine._drawings) do
+        cleanupTarget(key)
+    end
+    for model, _ in pairs(EspEngine._highlights) do
+        cleanupHighlight(model)
+    end
+end
 
-    self._connections["loop"] = RunService.RenderStepped:Connect(function()
-        local root      = GetRoot()
-        if not root then return end
-        local playerPos = root.Position
-        local range     = StateManager:GetConfig("ScanRange")
-        local targets   = TargetScanner:Scan()
+-- Vòng lặp render ESP chính
+function EspEngine.StartRenderLoop()
+    if EspEngine._connections["Render"] then return end
 
-        -- Tạo set mục tiêu hiện tại để so sánh
-        local currentSet = {}
+    local conn = RunService.RenderStepped:Connect(function()
+        local anyEsp = State:IsOn("EspLine") or State:IsOn("EspBox")
+            or State:IsOn("EspName") or State:IsOn("EspDistance")
+            or State:IsOn("EspHologram")
+        if not anyEsp then return end
+
+        local cam = Workspace.CurrentCamera
+        local vp = cam.ViewportSize
+        local targets = Scanner:GetTargets()
+
+        -- Thu thập keys hiện tại
+        local activeKeys = {}
+
         for _, t in ipairs(targets) do
-            currentSet[t.model] = true
-        end
+            local key = tostring(t.root)
+            activeKeys[key] = true
 
-        -- Xóa mục tiêu không còn hợp lệ
-        for model, _ in pairs(self._drawings) do
-            if not currentSet[model] then
-                self:CleanupTarget(model)
+            if not EspEngine._drawings[key] then
+                EspEngine._drawings[key] = {}
             end
-        end
-        for model, _ in pairs(self._highlights) do
-            if not currentSet[model] then
-                self:CleanupTarget(model)
+            local d = EspEngine._drawings[key]
+
+            local rootPos = t.root.Position
+            local screenPos, onScreen, depth = worldToScreen(rootPos)
+            if not onScreen or depth < 0 then
+                -- Mục tiêu sau lưng camera, ẩn
+                for _, obj in pairs(d) do
+                    pcall(function() if obj then obj.Visible = false end end)
+                end
+                goto continue
             end
-        end
 
-        -- Cập nhật/vẽ cho từng mục tiêu hợp lệ
-        for _, t in ipairs(targets) do
-            local model = t.model
-
-            -- Khởi tạo entry nếu chưa có
-            if not self._drawings[model] then
-                self._drawings[model] = {}
-            end
-            local d = self._drawings[model]
-
-            local targetPos    = TargetScanner:GetTargetPos(model)
-            if not targetPos then continue end
-            local dist         = t.distance
-            local screenPos, onScreen = WorldToScreen(targetPos)
-
-            -- === ESP LINE ===
-            if StateManager:IsOn("EspLine") then
-                local vpSize = Camera.ViewportSize
-                local top    = Vector2.new(vpSize.X / 2, 0)
+            -- ---- ESP LINE ----
+            if State:IsOn("EspLine") then
                 if not d.line then
-                    d.line = CreateDrawing("Line", {
-                        Thickness = 1,
-                        Color     = Color3.fromRGB(255, 100, 100),
-                        Transparency = 1,
-                        Visible   = false,
-                    })
+                    d.line = newDrawing("Line")
+                    if d.line then
+                        d.line.Color = Color3.fromRGB(255, 50, 50)
+                        d.line.Thickness = 1.5
+                        d.line.Transparency = 1
+                        d.line.ZIndex = 1
+                    end
                 end
                 if d.line then
-                    d.line.From    = top
-                    d.line.To      = screenPos
-                    d.line.Visible = onScreen
+                    d.line.From = Vector2.new(vp.X / 2, 0) -- Cạnh trên giữa màn hình
+                    d.line.To = screenPos
+                    d.line.Visible = true
                 end
             elseif d.line then
                 d.line.Visible = false
             end
 
-            -- === ESP BOX ===
-            if StateManager:IsOn("EspBox") then
-                local anyOn, x1, y1, x2, y2 = GetModelBounds2D(model)
-                if not d.box then
-                    d.box = CreateDrawing("Square", {
-                        Thickness    = 1,
-                        Color        = Color3.fromRGB(255, 255, 0),
-                        Filled       = false,
-                        Transparency = 1,
-                        Visible      = false,
-                    })
+            -- ---- ESP BOX ----
+            if State:IsOn("EspBox") then
+                local bx1, by1, bx2, by2 = getModelBounds2D(t.model)
+                if bx1 then
+                    -- Vẽ 4 đường thẳng thành hình chữ nhật
+                    local function ensureBoxLine(name, color)
+                        if not d["box_"..name] then
+                            d["box_"..name] = newDrawing("Line")
+                            if d["box_"..name] then
+                                d["box_"..name].Color = color or Color3.fromRGB(0, 255, 0)
+                                d["box_"..name].Thickness = 1.5
+                                d["box_"..name].Transparency = 1
+                            end
+                        end
+                        return d["box_"..name]
+                    end
+                    local top    = ensureBoxLine("top")
+                    local bottom = ensureBoxLine("bottom")
+                    local left   = ensureBoxLine("left")
+                    local right  = ensureBoxLine("right")
+                    if top then
+                        top.From = Vector2.new(bx1, by1); top.To = Vector2.new(bx2, by1); top.Visible = true
+                    end
+                    if bottom then
+                        bottom.From = Vector2.new(bx1, by2); bottom.To = Vector2.new(bx2, by2); bottom.Visible = true
+                    end
+                    if left then
+                        left.From = Vector2.new(bx1, by1); left.To = Vector2.new(bx1, by2); left.Visible = true
+                    end
+                    if right then
+                        right.From = Vector2.new(bx2, by1); right.To = Vector2.new(bx2, by2); right.Visible = true
+                    end
                 end
-                if d.box and anyOn then
-                    d.box.Position = Vector2.new(x1, y1)
-                    d.box.Size     = Vector2.new(x2 - x1, y2 - y1)
-                    d.box.Visible  = true
-                elseif d.box then
-                    d.box.Visible = false
+            else
+                for _, side in ipairs({"top","bottom","left","right"}) do
+                    if d["box_"..side] then d["box_"..side].Visible = false end
                 end
-            elseif d.box then
-                d.box.Visible = false
             end
 
-            -- === ESP NAME ===
-            if StateManager:IsOn("EspName") then
-                if not d.nameL then
-                    d.nameL = CreateDrawing("Text", {
-                        Size      = 14,
-                        Color     = Color3.fromRGB(255, 255, 255),
-                        Outline   = true,
-                        Center    = true,
-                        Visible   = false,
-                    })
+            -- ---- ESP NAME ----
+            if State:IsOn("EspName") then
+                if not d.name then
+                    d.name = newDrawing("Text")
+                    if d.name then
+                        d.name.Color = Color3.fromRGB(255, 255, 255)
+                        d.name.Size = 14
+                        d.name.Center = true
+                        d.name.Outline = true
+                    end
                 end
-                if d.nameL then
-                    d.nameL.Text    = model.Name
-                    d.nameL.Position = Vector2.new(screenPos.X, screenPos.Y - 20)
-                    d.nameL.Visible  = onScreen
+                if d.name then
+                    d.name.Text = t.model.Name
+                    d.name.Position = screenPos - Vector2.new(0, 20)
+                    d.name.Visible = true
                 end
-            elseif d.nameL then
-                d.nameL.Visible = false
+            elseif d.name then
+                d.name.Visible = false
             end
 
-            -- === ESP DISTANCE ===
-            if StateManager:IsOn("EspDistance") then
-                if not d.distL then
-                    d.distL = CreateDrawing("Text", {
-                        Size    = 12,
-                        Color   = Color3.fromRGB(100, 255, 100),
-                        Outline = true,
-                        Center  = true,
-                        Visible = false,
-                    })
+            -- ---- ESP DISTANCE ----
+            if State:IsOn("EspDistance") then
+                if not d.dist then
+                    d.dist = newDrawing("Text")
+                    if d.dist then
+                        d.dist.Color = Color3.fromRGB(255, 220, 0)
+                        d.dist.Size = 12
+                        d.dist.Center = true
+                        d.dist.Outline = true
+                    end
                 end
-                if d.distL then
-                    d.distL.Text     = string.format("%.0f studs", dist)
-                    d.distL.Position = Vector2.new(screenPos.X, screenPos.Y + 10)
-                    d.distL.Visible  = onScreen
+                if d.dist then
+                    d.dist.Text = string.format("%.1f m", t.distance)
+                    d.dist.Position = screenPos + Vector2.new(0, 10)
+                    d.dist.Visible = true
                 end
-            elseif d.distL then
-                d.distL.Visible = false
+            elseif d.dist then
+                d.dist.Visible = false
             end
 
-            -- === ESP HOLOGRAM (Highlight xuyên tường) ===
-            if StateManager:IsOn("EspHologram") then
-                if not self._highlights[model] then
+            -- ---- ESP HOLOGRAM (Highlight xuyên tường) ----
+            if State:IsOn("EspHologram") then
+                if not EspEngine._highlights[t.model] then
                     local hl = Instance.new("Highlight")
-                    hl.FillColor      = Color3.fromRGB(255, 50, 50)
-                    hl.OutlineColor   = Color3.fromRGB(255, 255, 255)
-                    hl.FillTransparency    = 0.5
+                    hl.Adornee = t.model
+                    hl.FillColor = Color3.fromRGB(255, 100, 0)
+                    hl.FillTransparency = 0.5
+                    hl.OutlineColor = Color3.fromRGB(255, 255, 0)
                     hl.OutlineTransparency = 0
-                    hl.DepthMode      = Enum.HighlightDepthMode.AlwaysOnTop
-                    hl.Adornee        = model
-                    hl.Parent         = model
-                    self._highlights[model] = hl
+                    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop -- Xuyên tường
+                    hl.Parent = t.model
+                    EspEngine._highlights[t.model] = hl
                 end
-            elseif self._highlights[model] then
-                self._highlights[model]:Destroy()
-                self._highlights[model] = nil
+            else
+                if EspEngine._highlights[t.model] then
+                    cleanupHighlight(t.model)
+                end
+            end
+
+            ::continue::
+        end
+
+        -- Dọn dẹp mục tiêu đã ra ngoài phạm vi/chết
+        for key, _ in pairs(EspEngine._drawings) do
+            if not activeKeys[key] then
+                cleanupTarget(key)
             end
         end
+        -- Dọn highlight model không còn trong targets
+        for model, _ in pairs(EspEngine._highlights) do
+            local stillActive = false
+            for _, t in ipairs(targets) do
+                if t.model == model then stillActive = true; break end
+            end
+            if not stillActive then cleanupHighlight(model) end
+        end
     end)
+    EspEngine._connections["Render"] = conn
 end
 
-function EspEngine:StopLoop()
-    if self._connections["loop"] then
-        self._connections["loop"]:Disconnect()
-        self._connections["loop"] = nil
+function EspEngine.StopRenderLoop()
+    if EspEngine._connections["Render"] then
+        pcall(function() EspEngine._connections["Render"]:Disconnect() end)
+        EspEngine._connections["Render"] = nil
     end
-    self:CleanupAll()
+    EspEngine.CleanupAll()
 end
 
 -- ============================================================
 -- MODULE: MovementAndWorld
--- Fly Down, Fly Dron, No Clip, Fly Air, Speed, Night Vision, Fix Lag
+-- Fly Down, Fly Dron, No Clip, Fly Air, Speed, Jumping Air, Night Vision, Fix Lag
 -- ============================================================
 local MovementAndWorld = {}
 MovementAndWorld._connections = {}
-MovementAndWorld._runLoops    = {}
-MovementAndWorld._snapshots   = {}
+MovementAndWorld._flyBodyForces = {}
 
-local function StopMoveLoop(name)
-    MovementAndWorld._runLoops[name] = false
-end
-
-local function CleanMoveConn(name)
-    if MovementAndWorld._connections[name] then
-        MovementAndWorld._connections[name]:Disconnect()
-        MovementAndWorld._connections[name] = nil
+-- Utility: lấy BodyVelocity hoặc tạo mới
+local function getOrCreateBodyVelocity(root, name)
+    local bv = root:FindFirstChild(name)
+    if not bv or not bv:IsA("BodyVelocity") then
+        bv = Instance.new("BodyVelocity")
+        bv.Name = name
+        bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
     end
+    return bv
 end
 
--- ==========================================
--- FLY DOWN (Nằm ngửa, hạ xuống đất)
--- ==========================================
-function MovementAndWorld:StartFlyDown()
-    StopMoveLoop("flyDown")
-    self._runLoops["flyDown"] = true
-    local depth = StateManager:GetConfig("FlyDownDepth")
+local function getOrCreateBodyGyro(root, name)
+    local bg = root:FindFirstChild(name)
+    if not bg or not bg:IsA("BodyGyro") then
+        bg = Instance.new("BodyGyro")
+        bg.Name = name
+        bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
+        bg.D = 100
+        bg.Parent = root
+    end
+    return bg
+end
 
-    task.spawn(function()
-        while self._runLoops["flyDown"] and StateManager:IsOn("FlyDown") do
-            local char = GetCharacter()
-            local root = GetRoot()
-            local hum  = GetHumanoid()
-            if char and root and hum then
-                -- Nằm ngửa (xoay 90 độ quanh Z)
-                local pos = root.Position
-                root.CFrame = CFrame.new(pos.X, pos.Y + depth, pos.Z) * CFrame.Angles(math.rad(90), 0, 0)
+-- ---- Fly Down ----
+function MovementAndWorld.StartFlyDown()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    State:SaveSnapshot("FlyDown_CamCF", Workspace.CurrentCamera.CFrame)
 
-                -- Triệt tiêu trọng lực (BodyVelocity)
-                local bv = root:FindFirstChild("_FlyDownBV")
-                if not bv then
-                    bv = Instance.new("BodyVelocity")
-                    bv.Name       = "_FlyDownBV"
-                    bv.MaxForce   = Vector3.new(1e5, 1e5, 1e5)
-                    bv.Velocity   = Vector3.zero
-                    bv.Parent     = root
-                end
+    -- Lật ngửa nhân vật, đưa xuống đất
+    local bv = getOrCreateBodyVelocity(root, "FlyDownBV")
+    local bg = getOrCreateBodyGyro(root, "FlyDownBG")
+    if hum then hum.PlatformStand = true end
 
-                -- Điều khiển lên/xuống bằng phím
-                local moveDir = Vector3.zero
-                if UserInputService:IsKeyDown(Enum.KeyCode.E) then
-                    moveDir = Vector3.new(0, 1, 0)
-                elseif UserInputService:IsKeyDown(Enum.KeyCode.Q) then
-                    moveDir = Vector3.new(0, -1, 0)
-                end
-                bv.Velocity = moveDir * StateManager:GetConfig("FlySpeed")
-            end
-            task.wait(0.03)
+    -- Nằm ngửa (xoay 90 độ)
+    bg.CFrame = root.CFrame * CFrame.Angles(-math.pi/2, 0, 0)
+
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("FlyDown") then return end
+        local char2 = LocalPlayer.Character
+        local root2 = char2 and char2:FindFirstChild("HumanoidRootPart")
+        if not root2 then return end
+
+        local moveDir = Vector3.zero
+        -- Điều khiển lên/xuống bằng phím (Q = xuống, E = lên)
+        if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+            moveDir = moveDir + Vector3.new(0, -1, 0)
         end
-        -- Dọn dẹp
-        local root = GetRoot()
-        if root then
-            local bv = root:FindFirstChild("_FlyDownBV")
-            if bv then bv:Destroy() end
+        if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+            moveDir = moveDir + Vector3.new(0, 1, 0)
         end
+
+        local bv2 = root2:FindFirstChild("FlyDownBV")
+        if bv2 then bv2.Velocity = moveDir * State.Config.FlySpeed end
     end)
+    MovementAndWorld._connections["FlyDown"] = conn
 end
 
-function MovementAndWorld:StopFlyDown()
-    StopMoveLoop("flyDown")
-    local root = GetRoot()
+function MovementAndWorld.StopFlyDown()
+    if MovementAndWorld._connections["FlyDown"] then
+        pcall(function() MovementAndWorld._connections["FlyDown"]:Disconnect() end)
+        MovementAndWorld._connections["FlyDown"] = nil
+    end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
     if root then
-        local bv = root:FindFirstChild("_FlyDownBV")
+        local bv = root:FindFirstChild("FlyDownBV")
         if bv then bv:Destroy() end
+        local bg = root:FindFirstChild("FlyDownBG")
+        if bg then bg:Destroy() end
     end
-    -- Khôi phục tư thế nhân vật
-    local hum = GetHumanoid()
-    if hum then
-        -- Reset character
-        local char = GetCharacter()
-        if char then
-            local torso = char:FindFirstChild("HumanoidRootPart")
-            if torso then
-                torso.CFrame = CFrame.new(torso.Position)
-            end
-        end
-    end
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = false end
+    -- Giữ nguyên góc camera gốc
+    -- (Camera tự restore khi PlatformStand = false)
 end
 
--- ==========================================
--- FLY DRON (Bay ở độ cao cố định, mặt úp xuống)
--- ==========================================
-function MovementAndWorld:StartFlyDron()
-    StopMoveLoop("flyDron")
-    self._runLoops["flyDron"] = true
-    local height = StateManager:GetConfig("FlyDronHeight")
+-- ---- Fly Dron ----
+function MovementAndWorld.StartFlyDron()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = true end
 
-    task.spawn(function()
-        while self._runLoops["flyDron"] and StateManager:IsOn("FlyDron") do
-            local root = GetRoot()
-            if root then
-                local pos = root.Position
-                -- Giữ ở độ cao cố định, mặt úp xuống
-                local bv = root:FindFirstChild("_FlyDronBV")
-                if not bv then
-                    bv = Instance.new("BodyVelocity")
-                    bv.Name     = "_FlyDronBV"
-                    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-                    bv.Velocity = Vector3.zero
-                    bv.Parent   = root
-                end
+    -- Tư thế úp mặt xuống
+    local bg = getOrCreateBodyGyro(root, "FlyDronBG")
+    bg.CFrame = root.CFrame * CFrame.Angles(math.pi/2, 0, 0)
+    local bv = getOrCreateBodyVelocity(root, "FlyDronBV")
 
-                -- Giữ độ cao và úp mặt xuống
-                local moveDir = Vector3.zero
-                local spd     = StateManager:GetConfig("FlySpeed")
+    local targetHeight = root.Position.Y + State.Config.FlyDronHeight
 
-                -- Điều khiển lên/xuống
-                if UserInputService:IsKeyDown(Enum.KeyCode.E) then
-                    moveDir = moveDir + Vector3.new(0, spd, 0)
-                    StateManager:SetConfig("FlyDronHeight", height + 0.1)
-                    height = StateManager:GetConfig("FlyDronHeight")
-                elseif UserInputService:IsKeyDown(Enum.KeyCode.Q) then
-                    moveDir = moveDir + Vector3.new(0, -spd, 0)
-                    StateManager:SetConfig("FlyDronHeight", math.max(0, height - 0.1))
-                    height = StateManager:GetConfig("FlyDronHeight")
-                end
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("FlyDron") then return end
+        local char2 = LocalPlayer.Character
+        local root2 = char2 and char2:FindFirstChild("HumanoidRootPart")
+        if not root2 then return end
+        local bv2 = root2:FindFirstChild("FlyDronBV")
+        if not bv2 then return end
 
-                bv.Velocity = moveDir
+        -- Duy trì độ cao cố định, không rơi
+        local currentY = root2.Position.Y
+        local yCorrect = (targetHeight - currentY) * 10
 
-                -- Tư thế úp mặt xuống
-                root.CFrame = CFrame.new(pos) * CFrame.Angles(math.pi, 0, 0)
-            end
-            task.wait(0.03)
+        -- Di chuyển theo hướng camera
+        local cam = Workspace.CurrentCamera
+        local camFlat = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z).Unit
+        local moveDir = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camFlat end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camFlat end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+            moveDir = moveDir - cam.CFrame.RightVector * Vector3.new(1,0,1)
         end
-        local root = GetRoot()
-        if root then
-            local bv = root:FindFirstChild("_FlyDronBV")
-            if bv then bv:Destroy() end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+            moveDir = moveDir + cam.CFrame.RightVector * Vector3.new(1,0,1)
         end
+        -- Tăng/giảm độ cao (Q/E)
+        if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+            targetHeight = targetHeight + 0.1
+        end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
+            targetHeight = targetHeight - 0.1
+        end
+
+        bv2.Velocity = moveDir * State.Config.FlySpeed + Vector3.new(0, yCorrect, 0)
     end)
+    MovementAndWorld._connections["FlyDron"] = conn
 end
 
-function MovementAndWorld:StopFlyDron()
-    StopMoveLoop("flyDron")
-    local root = GetRoot()
+function MovementAndWorld.StopFlyDron()
+    if MovementAndWorld._connections["FlyDron"] then
+        pcall(function() MovementAndWorld._connections["FlyDron"]:Disconnect() end)
+        MovementAndWorld._connections["FlyDron"] = nil
+    end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
     if root then
-        local bv = root:FindFirstChild("_FlyDronBV")
+        local bv = root:FindFirstChild("FlyDronBV")
         if bv then bv:Destroy() end
+        local bg = root:FindFirstChild("FlyDronBG")
+        if bg then bg:Destroy() end
     end
-end
-
--- ==========================================
--- NO CLIP
--- ==========================================
-function MovementAndWorld:StartNoClip()
-    CleanMoveConn("noClip")
-    local char = GetCharacter()
-    if not char then return end
-
-    -- Lưu trạng thái CanCollide gốc
-    local origCollide = {}
-    for _, part in ipairs(char:GetDescendants()) do
-        if part:IsA("BasePart") then
-            origCollide[part] = part.CanCollide
-            part.CanCollide   = false
-        end
-    end
-    self._snapshots["noClip"] = origCollide
-
-    -- Giữ NoClip mỗi frame vì game có thể reset
-    self._connections["noClip"] = RunService.Stepped:Connect(function()
-        if not StateManager:IsOn("NoClip") then return end
-        local c = GetCharacter()
-        if c then
-            for _, part in ipairs(c:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
-                end
-            end
-        end
-    end)
-end
-
-function MovementAndWorld:StopNoClip()
-    CleanMoveConn("noClip")
-    -- Khôi phục CanCollide gốc
-    local snap = self._snapshots["noClip"] or {}
-    for part, orig in pairs(snap) do
-        if part and part.Parent then
-            part.CanCollide = orig
-        end
-    end
-    self._snapshots["noClip"] = nil
-end
-
--- ==========================================
--- FLY AIR (Bay trên không, giữ vị trí khi đứng yên)
--- ==========================================
-function MovementAndWorld:StartFlyAir()
-    StopMoveLoop("flyAir")
-    self._runLoops["flyAir"] = true
-
-    task.spawn(function()
-        while self._runLoops["flyAir"] and StateManager:IsOn("FlyAir") do
-            local root = GetRoot()
-            local hum  = GetHumanoid()
-            if root and hum then
-                local spd = StateManager:GetConfig("FlyAirSpeed")
-
-                -- Tính hướng di chuyển theo camera
-                local camCF   = Camera.CFrame
-                local moveVec = Vector3.zero
-
-                if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-                    moveVec = moveVec + camCF.LookVector
-                end
-                if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-                    moveVec = moveVec - camCF.LookVector
-                end
-                if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-                    moveVec = moveVec - camCF.RightVector
-                end
-                if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-                    moveVec = moveVec + camCF.RightVector
-                end
-                if UserInputService:IsKeyDown(Enum.KeyCode.E) then
-                    moveVec = moveVec + Vector3.new(0, 1, 0)
-                end
-                if UserInputService:IsKeyDown(Enum.KeyCode.Q) then
-                    moveVec = moveVec - Vector3.new(0, 1, 0)
-                end
-
-                -- Tạo hoặc cập nhật BodyVelocity
-                local bv = root:FindFirstChild("_FlyAirBV")
-                if not bv then
-                    bv = Instance.new("BodyVelocity")
-                    bv.Name     = "_FlyAirBV"
-                    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-                    bv.Parent   = root
-                end
-
-                -- Giữ vị trí khi không nhấn phím (velocity = 0)
-                if moveVec.Magnitude > 0 then
-                    bv.Velocity = moveVec.Unit * spd
-                else
-                    bv.Velocity = Vector3.zero
-                end
-
-                -- Vô hiệu hóa trọng lực của Humanoid
-                hum.PlatformStand = true
-            end
-            task.wait(0.03)
-        end
-
-        -- Khôi phục
-        local root = GetRoot()
-        local hum  = GetHumanoid()
-        if root then
-            local bv = root:FindFirstChild("_FlyAirBV")
-            if bv then bv:Destroy() end
-        end
-        if hum then
-            hum.PlatformStand = false
-        end
-    end)
-end
-
-function MovementAndWorld:StopFlyAir()
-    StopMoveLoop("flyAir")
-    local root = GetRoot()
-    local hum  = GetHumanoid()
-    if root then
-        local bv = root:FindFirstChild("_FlyAirBV")
-        if bv then bv:Destroy() end
-    end
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
     if hum then hum.PlatformStand = false end
 end
 
--- ==========================================
--- SPEED (WalkSpeed tùy chỉnh)
--- ==========================================
-function MovementAndWorld:StartSpeed()
-    local hum = GetHumanoid()
-    if not hum then return end
-    -- Lưu tốc độ gốc
-    if not self._snapshots["speed"] then
-        self._snapshots["speed"] = {WalkSpeed = hum.WalkSpeed}
+-- ---- No Clip ----
+local _noClipOriginals = {} -- {part => CanCollide}
+
+function MovementAndWorld.StartNoClip()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            _noClipOriginals[part] = part.CanCollide
+            part.CanCollide = false
+        end
     end
-    -- Áp dụng tốc độ mới
-    hum.WalkSpeed = StateManager:GetConfig("WalkSpeed")
-
-    -- Theo dõi thay đổi nhân vật để áp dụng lại
-    CleanMoveConn("speedWatch")
-    self._connections["speedWatch"] = RunService.Heartbeat:Connect(function()
-        if not StateManager:IsOn("Speed") then return end
-        local h = GetHumanoid()
-        if h then h.WalkSpeed = StateManager:GetConfig("WalkSpeed") end
-    end)
-end
-
-function MovementAndWorld:StopSpeed()
-    CleanMoveConn("speedWatch")
-    local hum  = GetHumanoid()
-    local snap = self._snapshots["speed"]
-    if hum and snap then
-        hum.WalkSpeed = snap.WalkSpeed
-    end
-    self._snapshots["speed"] = nil
-end
-
--- ==========================================
--- JUMPING AIR (Nhảy trên không)
--- ==========================================
-function MovementAndWorld:StartJumpingAir()
-    CleanMoveConn("jumpAir")
-    self._connections["jumpAir"] = UserInputService.JumpRequest:Connect(function()
-        if not StateManager:IsOn("JumpingAir") then return end
-        local hum = GetHumanoid()
-        if hum then
-            -- Cho phép nhảy khi đang trên không
-            local prevState = hum:GetState()
-            hum:ChangeState(Enum.HumanoidStateType.Jumping)
-            task.wait(0.1)
-            -- Giải phóng trạng thái để không bị kẹt
-            if hum:GetState() == Enum.HumanoidStateType.Jumping then
-                hum:ChangeState(Enum.HumanoidStateType.FreeFall)
+    -- Liên tục tắt CanCollide vì game có thể reset
+    local conn = RunService.Stepped:Connect(function()
+        if not State:IsOn("NoClip") then return end
+        local char2 = LocalPlayer.Character
+        if not char2 then return end
+        for _, part in ipairs(char2:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
             end
         end
     end)
+    MovementAndWorld._connections["NoClip"] = conn
 end
 
-function MovementAndWorld:StopJumpingAir()
-    CleanMoveConn("jumpAir")
-end
-
--- ==========================================
--- NIGHT VISION
--- ==========================================
-function MovementAndWorld:StartNightVision()
-    -- Lưu cấu hình ánh sáng gốc
-    if not self._snapshots["nightVision"] then
-        self._snapshots["nightVision"] = {
-            Ambient         = Lighting.Ambient,
-            OutdoorAmbient  = Lighting.OutdoorAmbient,
-            Brightness      = Lighting.Brightness,
-            FogEnd          = Lighting.FogEnd,
-            FogStart        = Lighting.FogStart,
-        }
+function MovementAndWorld.StopNoClip()
+    if MovementAndWorld._connections["NoClip"] then
+        pcall(function() MovementAndWorld._connections["NoClip"]:Disconnect() end)
+        MovementAndWorld._connections["NoClip"] = nil
     end
-    -- Tắt bóng tối và sương mù
-    Lighting.Ambient        = Color3.fromRGB(255, 255, 255)
-    Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
-    Lighting.Brightness     = 2
-    Lighting.FogEnd         = 100000
-    Lighting.FogStart       = 100000
+    -- Khôi phục CanCollide gốc
+    for part, orig in pairs(_noClipOriginals) do
+        pcall(function()
+            if part and part.Parent then part.CanCollide = orig end
+        end)
+    end
+    _noClipOriginals = {}
+end
 
-    -- Tắt các hiệu ứng hậu kỳ của Lighting
-    for _, effect in ipairs(Lighting:GetChildren()) do
-        if effect:IsA("BlurEffect") or effect:IsA("ColorCorrectionEffect") or effect:IsA("DepthOfFieldEffect") then
-            if not effect:FindFirstChild("_NVOrig") then
-                local tag = Instance.new("BoolValue")
-                tag.Name   = "_NVOrig"
-                tag.Value  = effect.Enabled
-                tag.Parent = effect
-            end
+-- ---- Fly Air ----
+function MovementAndWorld.StartFlyAir()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = true end
+
+    local bv = getOrCreateBodyVelocity(root, "FlyAirBV")
+    local bg = getOrCreateBodyGyro(root, "FlyAirBG")
+
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("FlyAir") then return end
+        local char2 = LocalPlayer.Character
+        local root2 = char2 and char2:FindFirstChild("HumanoidRootPart")
+        if not root2 then return end
+        local bv2 = root2:FindFirstChild("FlyAirBV")
+        local bg2 = root2:FindFirstChild("FlyAirBG")
+        if not bv2 then return end
+
+        local cam = Workspace.CurrentCamera
+        local speed = State.Config.FlySpeed
+
+        -- Hướng di chuyển theo camera
+        local camCF = cam.CFrame
+        local forward = camCF.LookVector
+        local right   = camCF.RightVector
+        local up      = Vector3.new(0, 1, 0)
+
+        local moveDir = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + forward end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - forward end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.E) then moveDir = moveDir + up end   -- Lên
+        if UserInputService:IsKeyDown(Enum.KeyCode.Q) then moveDir = moveDir - up end   -- Xuống
+
+        -- Nếu không nhấn phím: giữ nguyên vị trí (velocity = 0)
+        if moveDir.Magnitude > 0 then
+            bv2.Velocity = moveDir.Unit * speed
+        else
+            bv2.Velocity = Vector3.zero  -- Fix tự rơi khi đứng yên
+        end
+
+        -- Giữ hướng nhân vật theo camera (nằm ngang)
+        if bg2 then
+            bg2.CFrame = CFrame.new(root2.Position, root2.Position + camCF.LookVector)
+        end
+    end)
+    MovementAndWorld._connections["FlyAir"] = conn
+end
+
+function MovementAndWorld.StopFlyAir()
+    if MovementAndWorld._connections["FlyAir"] then
+        pcall(function() MovementAndWorld._connections["FlyAir"]:Disconnect() end)
+        MovementAndWorld._connections["FlyAir"] = nil
+    end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        local bv = root:FindFirstChild("FlyAirBV")
+        if bv then bv:Destroy() end
+        local bg = root:FindFirstChild("FlyAirBG")
+        if bg then bg:Destroy() end
+    end
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = false end
+end
+
+-- ---- Speed ----
+function MovementAndWorld.StartSpeed()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        State:SaveSnapshot("WalkSpeed_Orig", hum.WalkSpeed)
+        hum.WalkSpeed = State.Config.WalkSpeed
+    end
+    -- Cập nhật realtime nếu config thay đổi
+    local conn = RunService.Heartbeat:Connect(function()
+        if not State:IsOn("Speed") then return end
+        local char2 = LocalPlayer.Character
+        local hum2 = char2 and char2:FindFirstChildOfClass("Humanoid")
+        if hum2 then hum2.WalkSpeed = State.Config.WalkSpeed end
+    end)
+    MovementAndWorld._connections["Speed"] = conn
+end
+
+function MovementAndWorld.StopSpeed()
+    if MovementAndWorld._connections["Speed"] then
+        pcall(function() MovementAndWorld._connections["Speed"]:Disconnect() end)
+        MovementAndWorld._connections["Speed"] = nil
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local orig = State:GetSnapshot("WalkSpeed_Orig") or 16
+        hum.WalkSpeed = orig
+        State:ClearSnapshot("WalkSpeed_Orig")
+    end
+end
+
+-- ---- Jumping Air ----
+function MovementAndWorld.StartJumpingAir()
+    -- Cho phép nhảy khi đang bay, fix kẹt bằng cách set FloorMaterial
+    local conn = UserInputService.JumpRequest:Connect(function()
+        if not State:IsOn("JumpingAir") then return end
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum then return end
+        -- Áp lực nhảy lên khi trên không
+        local bv = getOrCreateBodyVelocity(root, "JumpAirBV")
+        bv.Velocity = Vector3.new(0, hum.JumpPower or 50, 0)
+        -- Tự dọn sau 0.1s để không kẹt
+        task.delay(0.15, function()
+            if bv and bv.Parent then bv:Destroy() end
+        end)
+    end)
+    MovementAndWorld._connections["JumpingAir"] = conn
+end
+
+function MovementAndWorld.StopJumpingAir()
+    if MovementAndWorld._connections["JumpingAir"] then
+        pcall(function() MovementAndWorld._connections["JumpingAir"]:Disconnect() end)
+        MovementAndWorld._connections["JumpingAir"] = nil
+    end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        local bv = root:FindFirstChild("JumpAirBV")
+        if bv then bv:Destroy() end
+    end
+end
+
+-- ---- Night Vision ----
+function MovementAndWorld.StartNightVision()
+    -- Lưu snapshot ánh sáng gốc
+    local lighting = Lighting
+    State:SaveSnapshot("NV_Brightness",    lighting.Brightness)
+    State:SaveSnapshot("NV_Ambient",       lighting.Ambient)
+    State:SaveSnapshot("NV_OutdoorAmbient",lighting.OutdoorAmbient)
+    State:SaveSnapshot("NV_FogEnd",        lighting.FogEnd)
+    State:SaveSnapshot("NV_FogStart",      lighting.FogStart)
+
+    -- Xóa bóng tối + sương mù
+    lighting.Brightness = 2
+    lighting.Ambient = Color3.fromRGB(178, 178, 178)
+    lighting.OutdoorAmbient = Color3.fromRGB(178, 178, 178)
+    lighting.FogEnd = 100000
+    lighting.FogStart = 100000
+
+    -- Tắt các PostEffect nặng
+    for _, effect in ipairs(lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            State:SaveSnapshot("NV_Effect_"..effect.Name, effect.Enabled)
             effect.Enabled = false
         end
     end
 end
 
-function MovementAndWorld:StopNightVision()
-    local snap = self._snapshots["nightVision"]
-    if snap then
-        Lighting.Ambient        = snap.Ambient
-        Lighting.OutdoorAmbient = snap.OutdoorAmbient
-        Lighting.Brightness     = snap.Brightness
-        Lighting.FogEnd         = snap.FogEnd
-        Lighting.FogStart       = snap.FogStart
-        self._snapshots["nightVision"] = nil
+function MovementAndWorld.StopNightVision()
+    local lighting = Lighting
+    local function restore(key, prop)
+        local val = State:GetSnapshot(key)
+        if val ~= nil then
+            lighting[prop] = val
+            State:ClearSnapshot(key)
+        end
     end
-    -- Khôi phục hiệu ứng
-    for _, effect in ipairs(Lighting:GetChildren()) do
-        local orig = effect:FindFirstChild("_NVOrig")
-        if orig then
-            effect.Enabled = orig.Value
-            orig:Destroy()
+    restore("NV_Brightness",     "Brightness")
+    restore("NV_Ambient",        "Ambient")
+    restore("NV_OutdoorAmbient", "OutdoorAmbient")
+    restore("NV_FogEnd",         "FogEnd")
+    restore("NV_FogStart",       "FogStart")
+    -- Khôi phục PostEffect
+    for _, effect in ipairs(lighting:GetChildren()) do
+        if effect:IsA("PostEffect") then
+            local orig = State:GetSnapshot("NV_Effect_"..effect.Name)
+            if orig ~= nil then
+                effect.Enabled = orig
+                State:ClearSnapshot("NV_Effect_"..effect.Name)
+            end
         end
     end
 end
 
--- ==========================================
--- FIX LAG (Giảm tải đồ họa)
--- ==========================================
-function MovementAndWorld:StartFixLag()
-    if not self._snapshots["fixLag"] then
-        self._snapshots["fixLag"] = {
-            ShadowSoftness = Lighting.ShadowSoftness,
-        }
-    end
-
-    -- Giảm chất lượng đổ bóng
-    Lighting.ShadowSoftness = 0
-
-    -- Xóa các hiệu ứng nặng: Particle, Beam, Trail, v.v.
-    for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Beam") then
-            if not obj:FindFirstChild("_FLHide") then
-                local tag = Instance.new("BoolValue")
-                tag.Name   = "_FLHide"
-                tag.Value  = obj.Enabled
-                tag.Parent = obj
-            end
-            if obj:IsA("ParticleEmitter") then
-                obj.Enabled = false
-            elseif obj:IsA("Trail") then
-                obj.Enabled = false
-            end
-        end
-
-        -- Giảm texture chất lượng thấp
-        if obj:IsA("SpecialMesh") then
-            if not obj:FindFirstChild("_FLMesh") then
-                local tag = Instance.new("StringValue")
-                tag.Name   = "_FLMesh"
-                tag.Value  = obj.MeshType.Name
-                tag.Parent = obj
-            end
-        end
-    end
-
-    -- Tắt BlurEffect và DepthOfField
-    for _, effect in ipairs(Lighting:GetChildren()) do
-        if effect:IsA("BlurEffect") or effect:IsA("DepthOfFieldEffect") or effect:IsA("SunRaysEffect") then
-            if not effect:FindFirstChild("_FLEff") then
-                local tag = Instance.new("BoolValue")
-                tag.Name   = "_FLEff"
-                tag.Value  = effect.Enabled
-                tag.Parent = effect
-            end
+-- ---- Fix Lag ----
+function MovementAndWorld.StartFixLag()
+    -- Vô hiệu hóa các hiệu ứng nặng để tăng FPS
+    local lighting = Lighting
+    for _, effect in ipairs(lighting:GetChildren()) do
+        if effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
+            or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect") then
+            State:SaveSnapshot("FL_Effect_"..effect.Name.."_"..effect.ClassName, effect.Enabled)
             effect.Enabled = false
         end
     end
-end
-
-function MovementAndWorld:StopFixLag()
-    local snap = self._snapshots["fixLag"]
-    if snap then
-        Lighting.ShadowSoftness = snap.ShadowSoftness
-        self._snapshots["fixLag"] = nil
-    end
-
-    -- Khôi phục hiệu ứng
+    -- Giảm chất lượng render
+    State:SaveSnapshot("FL_QualityLevel", settings().Rendering.QualityLevel)
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+    -- Xóa Particle/Beam/Smoke trong Workspace
     for _, obj in ipairs(Workspace:GetDescendants()) do
-        local tag = obj:FindFirstChild("_FLHide")
-        if tag then
-            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
-                obj.Enabled = tag.Value
-            end
-            tag:Destroy()
+        if obj:IsA("ParticleEmitter") or obj:IsA("Smoke")
+            or obj:IsA("Fire") or obj:IsA("Sparkles") then
+            State:SaveSnapshot("FL_Particle_"..tostring(obj), obj.Enabled)
+            pcall(function() obj.Enabled = false end)
         end
     end
-    for _, effect in ipairs(Lighting:GetChildren()) do
-        local tag = effect:FindFirstChild("_FLEff")
-        if tag then
-            effect.Enabled = tag.Value
-            tag:Destroy()
+end
+
+function MovementAndWorld.StopFixLag()
+    local lighting = Lighting
+    for _, effect in ipairs(lighting:GetChildren()) do
+        if effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
+            or effect:IsA("SunRaysEffect") or effect:IsA("DepthOfFieldEffect") then
+            local key = "FL_Effect_"..effect.Name.."_"..effect.ClassName
+            local orig = State:GetSnapshot(key)
+            if orig ~= nil then
+                effect.Enabled = orig
+                State:ClearSnapshot(key)
+            end
+        end
+    end
+    local origQL = State:GetSnapshot("FL_QualityLevel")
+    if origQL then
+        pcall(function() settings().Rendering.QualityLevel = origQL end)
+        State:ClearSnapshot("FL_QualityLevel")
+    end
+    -- Khôi phục Particle
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("ParticleEmitter") or obj:IsA("Smoke")
+            or obj:IsA("Fire") or obj:IsA("Sparkles") then
+            local key = "FL_Particle_"..tostring(obj)
+            local orig = State:GetSnapshot(key)
+            if orig ~= nil then
+                pcall(function() obj.Enabled = orig end)
+                State:ClearSnapshot(key)
+            end
         end
     end
 end
 
 -- ============================================================
 -- MODULE: UIController
--- Giao diện kéo thả, 3 tab: Main / Esp / Khác
+-- Giao diện kéo thả, 3 tab: Main | Esp | Khác
 -- ============================================================
-local UIController = {}
 
--- Xóa GUI cũ nếu chạy lại script
-if CoreGui:FindFirstChild("DebugGUI_Main") then
-    CoreGui:FindFirstChild("DebugGUI_Main"):Destroy()
+-- Khởi động ESP render loop ngay từ đầu (chỉ hiển thị khi tính năng ON)
+EspEngine.StartRenderLoop()
+
+-- Utility tạo button
+local function createButton(parent, text, color, size, pos)
+    local btn = Instance.new("TextButton")
+    btn.Text = text
+    btn.BackgroundColor3 = color or Color3.fromRGB(50, 50, 60)
+    btn.TextColor3 = Color3.fromRGB(240, 240, 240)
+    btn.Size = size or UDim2.new(1, -10, 0, 28)
+    btn.Position = pos or UDim2.new(0, 5, 0, 0)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.AutoButtonColor = true
+    btn.BorderSizePixel = 0
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = btn
+    btn.Parent = parent
+    return btn
 end
 
--- Tạo ScreenGui chính
-local ScreenGui     = Instance.new("ScreenGui")
-ScreenGui.Name      = "DebugGUI_Main"
+-- Utility tạo label
+local function createLabel(parent, text, pos, size)
+    local lbl = Instance.new("TextLabel")
+    lbl.Text = text
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Size = size or UDim2.new(1, 0, 0, 20)
+    lbl.Position = pos or UDim2.new(0, 0, 0, 0)
+    lbl.Parent = parent
+    return lbl
+end
+
+-- Tạo số input
+local function createNumberInput(parent, label, default, minVal, maxVal, onChange)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, -10, 0, 44)
+    frame.BackgroundTransparency = 1
+    frame.Parent = parent
+
+    local lbl = createLabel(frame, label, UDim2.new(0, 5, 0, 0), UDim2.new(0.6, 0, 0, 20))
+
+    local box = Instance.new("TextBox")
+    box.Text = tostring(default)
+    box.Size = UDim2.new(0, 70, 0, 22)
+    box.Position = UDim2.new(1, -75, 0, 11)
+    box.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    box.TextColor3 = Color3.fromRGB(240, 240, 240)
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 12
+    box.BorderSizePixel = 0
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = box
+    box.Parent = frame
+
+    box.FocusLost:Connect(function()
+        local val = tonumber(box.Text)
+        if val then
+            val = math.clamp(val, minVal or -9999, maxVal or 9999)
+            box.Text = tostring(val)
+            if onChange then onChange(val) end
+        else
+            box.Text = tostring(default)
+        end
+    end)
+    return frame
+end
+
+-- ===== Xây dựng GUI =====
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "DebugGUI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent    = CoreGui
+ScreenGui.Parent = LocalPlayer.PlayerGui
 
--- ==========================================
--- FRAME CHÍNH (kéo thả được)
--- ==========================================
+-- Frame chính (kéo thả được)
 local MainFrame = Instance.new("Frame")
-MainFrame.Name            = "MainFrame"
-MainFrame.Size            = UDim2.new(0, 300, 0, 460)
-MainFrame.Position        = UDim2.new(0, 10, 0, 10)
-MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 280, 0, 420)
+MainFrame.Position = UDim2.new(0, 20, 0.5, -210)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
 MainFrame.BorderSizePixel = 0
-MainFrame.ClipsDescendants = false
-MainFrame.Parent          = ScreenGui
+MainFrame.ClipsDescendants = true
+MainFrame.Parent = ScreenGui
 
--- Bo góc
 local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 8)
+mainCorner.CornerRadius = UDim.new(0, 10)
 mainCorner.Parent = MainFrame
 
--- Viền
-local mainStroke = Instance.new("UIStroke")
-mainStroke.Color     = Color3.fromRGB(80, 80, 180)
-mainStroke.Thickness = 1.5
-mainStroke.Parent    = MainFrame
-
--- ==========================================
--- THANH TIÊU ĐỀ (kéo thả)
--- ==========================================
+-- Thanh tiêu đề (kéo thả)
 local TitleBar = Instance.new("Frame")
-TitleBar.Name              = "TitleBar"
-TitleBar.Size              = UDim2.new(1, 0, 0, 32)
-TitleBar.BackgroundColor3  = Color3.fromRGB(40, 40, 80)
-TitleBar.BorderSizePixel   = 0
-TitleBar.Parent            = MainFrame
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 36)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
 
 local titleCorner = Instance.new("UICorner")
-titleCorner.CornerRadius = UDim.new(0, 8)
+titleCorner.CornerRadius = UDim.new(0, 10)
 titleCorner.Parent = TitleBar
 
 local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Text             = "🎮 DebugGUI v1.0"
-TitleLabel.Size             = UDim2.new(1, -60, 1, 0)
-TitleLabel.Position         = UDim2.new(0, 8, 0, 0)
+TitleLabel.Text = "⚙ Debug GUI"
+TitleLabel.Size = UDim2.new(1, -70, 1, 0)
+TitleLabel.Position = UDim2.new(0, 10, 0, 0)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.TextColor3       = Color3.fromRGB(220, 220, 255)
-TitleLabel.TextSize         = 14
-TitleLabel.Font             = Enum.Font.GothamBold
-TitleLabel.TextXAlignment   = Enum.TextXAlignment.Left
-TitleLabel.Parent           = TitleBar
+TitleLabel.TextColor3 = Color3.fromRGB(255, 220, 80)
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 14
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
 
--- Nút thu gọn
-local CollapseBtn = Instance.new("TextButton")
-CollapseBtn.Text             = "−"
-CollapseBtn.Size             = UDim2.new(0, 28, 0, 22)
-CollapseBtn.Position         = UDim2.new(1, -58, 0, 5)
-CollapseBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
-CollapseBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
-CollapseBtn.Font             = Enum.Font.GothamBold
-CollapseBtn.TextSize         = 16
-CollapseBtn.BorderSizePixel  = 0
-CollapseBtn.Parent           = TitleBar
+-- Nút thu gọn/mở rộng
+local MinBtn = Instance.new("TextButton")
+MinBtn.Text = "−"
+MinBtn.Size = UDim2.new(0, 28, 0, 28)
+MinBtn.Position = UDim2.new(1, -32, 0, 4)
+MinBtn.BackgroundColor3 = Color3.fromRGB(255, 180, 0)
+MinBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+MinBtn.Font = Enum.Font.GothamBold
+MinBtn.TextSize = 16
+MinBtn.BorderSizePixel = 0
+local minCorner = Instance.new("UICorner")
+minCorner.CornerRadius = UDim.new(0, 6)
+minCorner.Parent = MinBtn
+MinBtn.Parent = TitleBar
 
-local collapseCorner = Instance.new("UICorner")
-collapseCorner.CornerRadius = UDim.new(0, 4)
-collapseCorner.Parent = CollapseBtn
+-- Trạng thái thu gọn
+local isMinimized = false
+local normalHeight = 420
+MinBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    if isMinimized then
+        MainFrame.Size = UDim2.new(0, 280, 0, 36)
+        MinBtn.Text = "+"
+    else
+        MainFrame.Size = UDim2.new(0, 280, 0, normalHeight)
+        MinBtn.Text = "−"
+    end
+end)
 
--- Nút đóng
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Text             = "✕"
-CloseBtn.Size             = UDim2.new(0, 24, 0, 22)
-CloseBtn.Position         = UDim2.new(1, -28, 0, 5)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-CloseBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
-CloseBtn.Font             = Enum.Font.GothamBold
-CloseBtn.TextSize         = 13
-CloseBtn.BorderSizePixel  = 0
-CloseBtn.Parent           = TitleBar
-
-local closeCorner = Instance.new("UICorner")
-closeCorner.CornerRadius = UDim.new(0, 4)
-closeCorner.Parent = CloseBtn
-
--- ==========================================
--- LOGIC KÉO THẢ
--- ==========================================
+-- ---- Kéo thả TitleBar ----
 local dragging = false
-local dragStart, startPos
+local dragInput, dragStart, startPos
 
 TitleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging  = true
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
         dragStart = input.Position
-        startPos  = MainFrame.Position
+        startPos = MainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+TitleBar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
     end
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+    if dragging and input == dragInput then
         local delta = input.Position - dragStart
         MainFrame.Position = UDim2.new(
             startPos.X.Scale,
@@ -1603,510 +1628,377 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = false
-    end
-end)
-
--- Thu gọn/mở rộng
-local collapsed    = false
-local contentFrame -- được định nghĩa bên dưới
-
-CollapseBtn.MouseButton1Click:Connect(function()
-    collapsed = not collapsed
-    if collapsed then
-        MainFrame.Size    = UDim2.new(0, 300, 0, 32)
-        CollapseBtn.Text  = "+"
-    else
-        MainFrame.Size    = UDim2.new(0, 300, 0, 460)
-        CollapseBtn.Text  = "−"
-    end
-end)
-
-CloseBtn.MouseButton1Click:Connect(function()
-    ScreenGui:Destroy()
-    EspEngine:StopLoop()
-end)
-
--- ==========================================
--- THANH TAB
--- ==========================================
+-- ---- Tab buttons ----
 local TabBar = Instance.new("Frame")
-TabBar.Name             = "TabBar"
-TabBar.Size             = UDim2.new(1, 0, 0, 30)
-TabBar.Position         = UDim2.new(0, 0, 0, 32)
-TabBar.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-TabBar.BorderSizePixel  = 0
-TabBar.Parent           = MainFrame
+TabBar.Size = UDim2.new(1, 0, 0, 30)
+TabBar.Position = UDim2.new(0, 0, 0, 36)
+TabBar.BackgroundColor3 = Color3.fromRGB(28, 28, 40)
+TabBar.BorderSizePixel = 0
+TabBar.Parent = MainFrame
 
-local TabLayout = Instance.new("UIListLayout")
-TabLayout.FillDirection = Enum.FillDirection.Horizontal
-TabLayout.SortOrder     = Enum.SortOrder.LayoutOrder
-TabLayout.Parent        = TabBar
+local tabNames = {"Main", "Esp", "Khác"}
+local tabBtns = {}
+local tabFrames = {}
+local activeTab = "Main"
 
-local tabNames   = {"Main", "Esp", "Khác"}
-local tabButtons = {}
-local tabPanels  = {}
-local activeTab  = "Main"
-
--- ==========================================
--- VÙNG NỘI DUNG (cuộn được)
--- ==========================================
-local ContentArea = Instance.new("Frame")
-ContentArea.Name             = "ContentArea"
-ContentArea.Size             = UDim2.new(1, 0, 1, -62)
-ContentArea.Position         = UDim2.new(0, 0, 0, 62)
-ContentArea.BackgroundTransparency = 1
-ContentArea.ClipsDescendants = true
-ContentArea.Parent           = MainFrame
-
--- Tạo từng panel tab (ScrollingFrame)
-for _, name in ipairs(tabNames) do
-    local panel = Instance.new("ScrollingFrame")
-    panel.Name                   = "Panel_" .. name
-    panel.Size                   = UDim2.new(1, 0, 1, 0)
-    panel.Position               = UDim2.new(0, 0, 0, 0)
-    panel.BackgroundTransparency = 1
-    panel.BorderSizePixel        = 0
-    panel.ScrollBarThickness     = 4
-    panel.ScrollBarImageColor3   = Color3.fromRGB(80, 80, 180)
-    panel.CanvasSize             = UDim2.new(0, 0, 0, 0)
-    panel.AutomaticCanvasSize    = Enum.AutomaticSize.Y
-    panel.Visible                = (name == "Main")
-    panel.Parent                 = ContentArea
-    tabPanels[name] = panel
-
-    local listLayout = Instance.new("UIListLayout")
-    listLayout.SortOrder    = Enum.SortOrder.LayoutOrder
-    listLayout.Padding      = UDim.new(0, 4)
-    listLayout.Parent       = panel
-
-    local padding = Instance.new("UIPadding")
-    padding.PaddingLeft   = UDim.new(0, 6)
-    padding.PaddingRight  = UDim.new(0, 6)
-    padding.PaddingTop    = UDim.new(0, 6)
-    padding.Parent        = panel
-end
-
--- Tạo nút tab
 for i, name in ipairs(tabNames) do
     local btn = Instance.new("TextButton")
-    btn.Text             = name
-    btn.Size             = UDim2.new(0, 94, 1, 0)
-    btn.LayoutOrder      = i
-    btn.BackgroundColor3 = (name == "Main") and Color3.fromRGB(60, 60, 150) or Color3.fromRGB(30, 30, 50)
-    btn.TextColor3       = Color3.fromRGB(220, 220, 255)
-    btn.Font             = Enum.Font.GothamMedium
-    btn.TextSize         = 13
-    btn.BorderSizePixel  = 0
-    btn.Parent           = TabBar
-    tabButtons[name]     = btn
+    btn.Text = name
+    btn.Size = UDim2.new(1/3, -2, 1, -4)
+    btn.Position = UDim2.new((i-1)/3, 1, 0, 2)
+    btn.BackgroundColor3 = i == 1
+        and Color3.fromRGB(80, 80, 120)
+        or Color3.fromRGB(40, 40, 55)
+    btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.BorderSizePixel = 0
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = btn
+    btn.Parent = TabBar
+    tabBtns[name] = btn
+end
 
-    btn.MouseButton1Click:Connect(function()
+-- Content area với ScrollingFrame cho từng tab
+local ContentArea = Instance.new("Frame")
+ContentArea.Size = UDim2.new(1, 0, 1, -66)
+ContentArea.Position = UDim2.new(0, 0, 0, 66)
+ContentArea.BackgroundTransparency = 1
+ContentArea.ClipsDescendants = true
+ContentArea.Parent = MainFrame
+
+for _, name in ipairs(tabNames) do
+    local sf = Instance.new("ScrollingFrame")
+    sf.Name = name
+    sf.Size = UDim2.new(1, 0, 1, 0)
+    sf.Position = UDim2.new(0, 0, 0, 0)
+    sf.BackgroundTransparency = 1
+    sf.ScrollBarThickness = 4
+    sf.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 150)
+    sf.CanvasSize = UDim2.new(0, 0, 0, 0)
+    sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sf.Visible = (name == "Main")
+    sf.Parent = ContentArea
+    tabFrames[name] = sf
+
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 4)
+    layout.Parent = sf
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 5)
+    padding.PaddingRight = UDim.new(0, 5)
+    padding.PaddingTop = UDim.new(0, 5)
+    padding.Parent = sf
+end
+
+-- Chuyển tab
+for _, name in ipairs(tabNames) do
+    tabBtns[name].MouseButton1Click:Connect(function()
         activeTab = name
         for _, n in ipairs(tabNames) do
-            tabPanels[n].Visible   = (n == name)
-            tabButtons[n].BackgroundColor3 = (n == name)
-                and Color3.fromRGB(60, 60, 150)
-                or  Color3.fromRGB(30, 30, 50)
+            tabFrames[n].Visible = (n == name)
+            tabBtns[n].BackgroundColor3 = (n == name)
+                and Color3.fromRGB(80, 80, 120)
+                or Color3.fromRGB(40, 40, 55)
         end
     end)
 end
 
--- ==========================================
--- HELPER: Tạo nút ON/OFF
--- ==========================================
-local function MakeToggleBtn(parent, label, feature, onEnable, onDisable, layoutOrder)
+-- ============================================================
+-- Hàm tạo toggle button (ON/OFF) tích hợp callback
+-- ============================================================
+local function createToggle(parent, label, feature, onEnable, onDisable, layoutOrder)
     local row = Instance.new("Frame")
-    row.Name             = "Row_" .. feature
-    row.Size             = UDim2.new(1, -6, 0, 34)
-    row.BackgroundColor3 = Color3.fromRGB(28, 28, 40)
-    row.BorderSizePixel  = 0
-    row.LayoutOrder      = layoutOrder or 0
-    row.Parent           = parent
-
-    local rowCorner = Instance.new("UICorner")
-    rowCorner.CornerRadius = UDim.new(0, 6)
-    rowCorner.Parent = row
+    row.Size = UDim2.new(1, -10, 0, 32)
+    row.BackgroundColor3 = Color3.fromRGB(30, 30, 42)
+    row.BorderSizePixel = 0
+    row.LayoutOrder = layoutOrder or 0
+    local rc = Instance.new("UICorner")
+    rc.CornerRadius = UDim.new(0, 6)
+    rc.Parent = row
+    row.Parent = parent
 
     local lbl = Instance.new("TextLabel")
-    lbl.Text             = label
-    lbl.Size             = UDim2.new(1, -68, 1, 0)
-    lbl.Position         = UDim2.new(0, 8, 0, 0)
+    lbl.Text = label
+    lbl.Size = UDim2.new(1, -70, 1, 0)
+    lbl.Position = UDim2.new(0, 8, 0, 0)
     lbl.BackgroundTransparency = 1
-    lbl.TextColor3       = Color3.fromRGB(200, 200, 230)
-    lbl.TextSize         = 13
-    lbl.Font             = Enum.Font.Gotham
-    lbl.TextXAlignment   = Enum.TextXAlignment.Left
-    lbl.Parent           = row
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = row
 
     local toggleBtn = Instance.new("TextButton")
-    toggleBtn.Text         = "OFF"
-    toggleBtn.Size         = UDim2.new(0, 56, 0, 24)
-    toggleBtn.Position     = UDim2.new(1, -62, 0.5, -12)
-    toggleBtn.BackgroundColor3 = Color3.fromRGB(160, 40, 40)
-    toggleBtn.TextColor3   = Color3.fromRGB(255, 255, 255)
-    toggleBtn.Font         = Enum.Font.GothamBold
-    toggleBtn.TextSize     = 12
+    toggleBtn.Text = "OFF"
+    toggleBtn.Size = UDim2.new(0, 56, 0, 22)
+    toggleBtn.Position = UDim2.new(1, -62, 0.5, -11)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleBtn.Font = Enum.Font.GothamBold
+    toggleBtn.TextSize = 11
     toggleBtn.BorderSizePixel = 0
-    toggleBtn.Parent       = row
-
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 5)
-    btnCorner.Parent = toggleBtn
+    local tc = Instance.new("UICorner")
+    tc.CornerRadius = UDim.new(0, 5)
+    tc.Parent = toggleBtn
+    toggleBtn.Parent = row
 
     toggleBtn.MouseButton1Click:Connect(function()
-        local isOn = StateManager:Toggle(feature)
+        local isOn = State:Toggle(feature)
         if isOn then
-            toggleBtn.Text             = "ON"
-            toggleBtn.BackgroundColor3 = Color3.fromRGB(40, 150, 40)
-            if onEnable then
-                local ok, err = pcall(onEnable)
-                if not ok then warn("[DebugGUI] Enable error:", err) end
-            end
+            toggleBtn.Text = "ON"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 180, 80)
+            if onEnable then pcall(onEnable) end
         else
-            toggleBtn.Text             = "OFF"
-            toggleBtn.BackgroundColor3 = Color3.fromRGB(160, 40, 40)
-            if onDisable then
-                local ok, err = pcall(onDisable)
-                if not ok then warn("[DebugGUI] Disable error:", err) end
-            end
+            toggleBtn.Text = "OFF"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+            if onDisable then pcall(onDisable) end
         end
     end)
-
-    return row, toggleBtn
-end
-
--- ==========================================
--- HELPER: Tạo slider/nhập số
--- ==========================================
-local function MakeSlider(parent, label, configKey, min, max, layoutOrder)
-    local row = Instance.new("Frame")
-    row.Name             = "Slider_" .. configKey
-    row.Size             = UDim2.new(1, -6, 0, 48)
-    row.BackgroundColor3 = Color3.fromRGB(28, 28, 40)
-    row.BorderSizePixel  = 0
-    row.LayoutOrder      = layoutOrder or 0
-    row.Parent           = parent
-
-    local rowCorner = Instance.new("UICorner")
-    rowCorner.CornerRadius = UDim.new(0, 6)
-    rowCorner.Parent = row
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Text             = label .. ": " .. tostring(StateManager:GetConfig(configKey))
-    lbl.Size             = UDim2.new(1, 0, 0, 20)
-    lbl.Position         = UDim2.new(0, 8, 0, 2)
-    lbl.BackgroundTransparency = 1
-    lbl.TextColor3       = Color3.fromRGB(180, 180, 220)
-    lbl.TextSize         = 12
-    lbl.Font             = Enum.Font.Gotham
-    lbl.TextXAlignment   = Enum.TextXAlignment.Left
-    lbl.Parent           = row
-
-    -- Nút giảm
-    local minusBtn = Instance.new("TextButton")
-    minusBtn.Text         = "−"
-    minusBtn.Size         = UDim2.new(0, 28, 0, 22)
-    minusBtn.Position     = UDim2.new(0, 8, 0, 22)
-    minusBtn.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
-    minusBtn.TextColor3   = Color3.fromRGB(255, 255, 255)
-    minusBtn.Font         = Enum.Font.GothamBold
-    minusBtn.TextSize     = 16
-    minusBtn.BorderSizePixel = 0
-    minusBtn.Parent       = row
-
-    local minusCorner = Instance.new("UICorner")
-    minusCorner.CornerRadius = UDim.new(0, 4)
-    minusCorner.Parent = minusBtn
-
-    -- Nhập giá trị
-    local valBox = Instance.new("TextBox")
-    valBox.Text           = tostring(StateManager:GetConfig(configKey))
-    valBox.Size           = UDim2.new(0, 80, 0, 22)
-    valBox.Position       = UDim2.new(0, 44, 0, 22)
-    valBox.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
-    valBox.TextColor3     = Color3.fromRGB(220, 220, 255)
-    valBox.Font           = Enum.Font.GothamMedium
-    valBox.TextSize       = 12
-    valBox.BorderSizePixel = 0
-    valBox.ClearTextOnFocus = false
-    valBox.Parent         = row
-
-    local valCorner = Instance.new("UICorner")
-    valCorner.CornerRadius = UDim.new(0, 4)
-    valCorner.Parent = valBox
-
-    -- Nút tăng
-    local plusBtn = Instance.new("TextButton")
-    plusBtn.Text          = "+"
-    plusBtn.Size          = UDim2.new(0, 28, 0, 22)
-    plusBtn.Position      = UDim2.new(0, 132, 0, 22)
-    plusBtn.BackgroundColor3 = Color3.fromRGB(40, 80, 40)
-    plusBtn.TextColor3    = Color3.fromRGB(255, 255, 255)
-    plusBtn.Font          = Enum.Font.GothamBold
-    plusBtn.TextSize      = 16
-    plusBtn.BorderSizePixel = 0
-    plusBtn.Parent        = row
-
-    local plusCorner = Instance.new("UICorner")
-    plusCorner.CornerRadius = UDim.new(0, 4)
-    plusCorner.Parent = plusBtn
-
-    local function UpdateValue(newVal)
-        newVal = math.clamp(tonumber(newVal) or StateManager:GetConfig(configKey), min, max)
-        StateManager:SetConfig(configKey, newVal)
-        valBox.Text = tostring(newVal)
-        lbl.Text    = label .. ": " .. tostring(newVal)
-    end
-
-    minusBtn.MouseButton1Click:Connect(function() UpdateValue(StateManager:GetConfig(configKey) - 1) end)
-    plusBtn.MouseButton1Click:Connect(function()  UpdateValue(StateManager:GetConfig(configKey) + 1) end)
-    valBox.FocusLost:Connect(function()           UpdateValue(valBox.Text)                         end)
 
     return row
 end
 
--- ==========================================
--- SECTION LABEL
--- ==========================================
-local function MakeSection(parent, text, layoutOrder)
-    local lbl = Instance.new("TextLabel")
-    lbl.Text             = "— " .. text .. " —"
-    lbl.Size             = UDim2.new(1, -6, 0, 20)
-    lbl.BackgroundTransparency = 1
-    lbl.TextColor3       = Color3.fromRGB(120, 120, 220)
-    lbl.TextSize         = 11
-    lbl.Font             = Enum.Font.GothamBold
-    lbl.TextXAlignment   = Enum.TextXAlignment.Center
-    lbl.LayoutOrder      = layoutOrder or 0
-    lbl.Parent           = parent
-    return lbl
-end
+-- ============================================================
+-- Tạo nội dung TAB MAIN
+-- ============================================================
+local mainTab = tabFrames["Main"]
 
--- ==========================================
--- TAB MAIN: Thêm các nút tính năng
--- ==========================================
-local mainPanel = tabPanels["Main"]
-local lo        = 0  -- layoutOrder counter
+createToggle(mainTab, "Tele Dron", "TeleDron",
+    CombatEngine.StartTeleDron,
+    CombatEngine.StopTeleDron, 1)
 
-local function LO() lo = lo + 1; return lo end
+-- Input SafeHeight cho Tele Dron
+local droneHeightInput = createNumberInput(mainTab,
+    "Drone Height Offset", State.Config.DroneHeightOffset, 1, 50,
+    function(v) State.Config.DroneHeightOffset = v end)
+droneHeightInput.LayoutOrder = 2
+droneHeightInput.Parent = mainTab
 
-MakeSection(mainPanel, "COMBAT FEATURES", LO())
+createToggle(mainTab, "Hitbox All Mod", "HitboxAllMod",
+    CombatEngine.StartHitboxAllMod,
+    CombatEngine.StopHitboxAllMod, 3)
 
-MakeToggleBtn(mainPanel, "Tele Dron", "TeleDron",
-    function() CombatEngine:StartTeleDron() end,
-    function() CombatEngine:StopTeleDron() end,
-    LO())
+local hitboxSizeInput = createNumberInput(mainTab,
+    "Hitbox Size", State.Config.HitboxSize, 1, 100,
+    function(v) State.Config.HitboxSize = v end)
+hitboxSizeInput.LayoutOrder = 4
+hitboxSizeInput.Parent = mainTab
 
-MakeSlider(mainPanel, "Safe Height", "TeleDronSafeHeight", 2, 50, LO())
+createToggle(mainTab, "Tele Kill", "TeleKill",
+    CombatEngine.StartTeleKill,
+    CombatEngine.StopTeleKill, 5)
 
-MakeToggleBtn(mainPanel, "Hitbox All Mod", "HitboxAllMod",
-    function() CombatEngine:StartHitboxAllMod() end,
-    function() CombatEngine:StopHitboxAllMod() end,
-    LO())
+createToggle(mainTab, "Aimbot", "Aimbot",
+    CombatEngine.StartAimbot,
+    CombatEngine.StopAimbot, 6)
 
-MakeSlider(mainPanel, "Hitbox Size", "HitboxSize", 1, 100, LO())  -- simplified (actual uses Vector3)
+createToggle(mainTab, "All Mod Im (Freeze Mob)", "AllModIm",
+    CombatEngine.StartAllModIm,
+    CombatEngine.StopAllModIm, 7)
 
-MakeToggleBtn(mainPanel, "Tele Kill", "TeleKill",
-    function() CombatEngine:StartTeleKill() end,
-    function() CombatEngine:StopTeleKill() end,
-    LO())
+createToggle(mainTab, "Model Độn Thổ", "ModelDonTho",
+    CombatEngine.StartModelDonTho,
+    CombatEngine.StopModelDonTho, 8)
 
-MakeToggleBtn(mainPanel, "Aimbot", "Aimbot",
-    function() CombatEngine:StartAimbot() end,
-    function() CombatEngine:StopAimbot() end,
-    LO())
+local donThoInput = createNumberInput(mainTab,
+    "Độ Sâu (studs)", State.Config.DonThoDepth, -100, -1,
+    function(v) State.Config.DonThoDepth = v end)
+donThoInput.LayoutOrder = 9
+donThoInput.Parent = mainTab
 
-MakeToggleBtn(mainPanel, "All Mod Im", "AllModIm",
-    function() CombatEngine:StartAllModIm() end,
-    function() CombatEngine:StopAllModIm() end,
-    LO())
+createToggle(mainTab, "Model Head Down", "ModelHeadDown",
+    CombatEngine.StartModelHeadDown,
+    CombatEngine.StopModelHeadDown, 10)
 
-MakeSection(mainPanel, "MODEL CONTROL", LO())
+local headDownInput = createNumberInput(mainTab,
+    "Depth (studs)", State.Config.HeadDownDepth, -50, -1,
+    function(v) State.Config.HeadDownDepth = v end)
+headDownInput.LayoutOrder = 11
+headDownInput.Parent = mainTab
 
-MakeToggleBtn(mainPanel, "Model Độn Thổ", "ModelBury",
-    function() CombatEngine:StartModelBury() end,
-    function() CombatEngine:StopModelBury() end,
-    LO())
+createToggle(mainTab, "Player Barrier", "PlayerBarrier",
+    CombatEngine.StartPlayerBarrier,
+    CombatEngine.StopPlayerBarrier, 12)
 
-MakeSlider(mainPanel, "Bury Depth", "ModelBuryDepth", -100, 0, LO())
+local barrierSizeInput = createNumberInput(mainTab,
+    "Barrier Size", State.Config.BarrierSize, 2, 50,
+    function(v) State.Config.BarrierSize = v end)
+barrierSizeInput.LayoutOrder = 13
+barrierSizeInput.Parent = mainTab
 
-MakeToggleBtn(mainPanel, "Model Head Down", "ModelHeadDown",
-    function() CombatEngine:StartModelHeadDown() end,
-    function() CombatEngine:StopModelHeadDown() end,
-    LO())
+createToggle(mainTab, "Long Legs", "LongLegs",
+    CombatEngine.StartLongLegs,
+    CombatEngine.StopLongLegs, 14)
 
-MakeSlider(mainPanel, "Head Depth", "ModelHeadDepth", -50, 0, LO())
+local longLegsInput = createNumberInput(mainTab,
+    "Leg Depth (studs)", State.Config.LongLegsDepth, -100, -1,
+    function(v) State.Config.LongLegsDepth = v end)
+longLegsInput.LayoutOrder = 15
+longLegsInput.Parent = mainTab
 
-MakeToggleBtn(mainPanel, "Player Barrier", "PlayerBarrier",
-    function() CombatEngine:StartPlayerBarrier() end,
-    function() CombatEngine:StopPlayerBarrier() end,
-    LO())
+createToggle(mainTab, "Long Head", "LongHead",
+    CombatEngine.StartLongHead,
+    CombatEngine.StopLongHead, 16)
 
-MakeSlider(mainPanel, "Barrier Size", "PlayerBarrierSize", 2, 50, LO())
+local longHeadInput = createNumberInput(mainTab,
+    "Head Height", State.Config.LongHeadHeight, 1, 50,
+    function(v) State.Config.LongHeadHeight = v end)
+longHeadInput.LayoutOrder = 17
+longHeadInput.Parent = mainTab
 
-MakeToggleBtn(mainPanel, "Long Legs", "LongLegs",
-    function() CombatEngine:StartLongLegs() end,
-    function() CombatEngine:StopLongLegs() end,
-    LO())
-
-MakeSlider(mainPanel, "Legs Depth", "LongLegsDepth", -100, 0, LO())
-
-MakeToggleBtn(mainPanel, "Long Head", "LongHead",
-    function() CombatEngine:StartLongHead() end,
-    function() CombatEngine:StopLongHead() end,
-    LO())
-
-MakeSlider(mainPanel, "Head Height", "LongHeadHeight", 1, 50, LO())
-
-MakeSlider(mainPanel, "Scan Range", "ScanRange", 10, 500, LO())
-
--- ==========================================
--- TAB ESP
--- ==========================================
-local espPanel = tabPanels["Esp"]
-local elo      = 0
-local function ELO() elo = elo + 1; return elo end
-
-MakeSection(espPanel, "ESP FEATURES", ELO())
-
--- Khởi động ESP loop một lần duy nhất (tự cập nhật theo flag)
-EspEngine:StartLoop()
-
-MakeToggleBtn(espPanel, "Esp Line", "EspLine",   function() end, function() end, ELO())
-MakeToggleBtn(espPanel, "Esp Box",  "EspBox",    function() end, function() end, ELO())
-MakeToggleBtn(espPanel, "Esp Name", "EspName",   function() end, function() end, ELO())
-MakeToggleBtn(espPanel, "Esp Distance", "EspDistance", function() end, function() end, ELO())
-MakeToggleBtn(espPanel, "Esp Hologram", "EspHologram", function() end, function() end, ELO())
-
-MakeSection(espPanel, "RANGE", ELO())
-MakeSlider(espPanel, "Scan Range", "ScanRange", 10, 500, ELO())
-
--- ==========================================
--- TAB KHÁC (Movement & World)
--- ==========================================
-local otherPanel = tabPanels["Khác"]
-local klo        = 0
-local function KLO() klo = klo + 1; return klo end
-
-MakeSection(otherPanel, "BAY & DI CHUYỂN", KLO())
-
-MakeToggleBtn(otherPanel, "Fly Down", "FlyDown",
-    function() MovementAndWorld:StartFlyDown() end,
-    function() MovementAndWorld:StopFlyDown() end,
-    KLO())
-
-MakeSlider(otherPanel, "Fly Down Depth", "FlyDownDepth", -50, 0, KLO())
-
-MakeToggleBtn(otherPanel, "Fly Dron", "FlyDron",
-    function() MovementAndWorld:StartFlyDron() end,
-    function() MovementAndWorld:StopFlyDron() end,
-    KLO())
-
-MakeSlider(otherPanel, "Fly Dron Height", "FlyDronHeight", 0, 50, KLO())
-
-MakeToggleBtn(otherPanel, "No Clip", "NoClip",
-    function() MovementAndWorld:StartNoClip() end,
-    function() MovementAndWorld:StopNoClip() end,
-    KLO())
-
-MakeToggleBtn(otherPanel, "Fly Air", "FlyAir",
-    function() MovementAndWorld:StartFlyAir() end,
-    function() MovementAndWorld:StopFlyAir() end,
-    KLO())
-
-MakeSlider(otherPanel, "Fly Speed", "FlyAirSpeed", 1, 500, KLO())
-
-MakeToggleBtn(otherPanel, "Speed", "Speed",
-    function() MovementAndWorld:StartSpeed() end,
-    function() MovementAndWorld:StopSpeed() end,
-    KLO())
-
-MakeSlider(otherPanel, "Walk Speed", "WalkSpeed", 1, 200, KLO())
-
-MakeToggleBtn(otherPanel, "Jumping Air", "JumpingAir",
-    function() MovementAndWorld:StartJumpingAir() end,
-    function() MovementAndWorld:StopJumpingAir() end,
-    KLO())
-
-MakeSection(otherPanel, "MÔI TRƯỜNG", KLO())
-
-MakeToggleBtn(otherPanel, "Night Vision", "NightVision",
-    function() MovementAndWorld:StartNightVision() end,
-    function() MovementAndWorld:StopNightVision() end,
-    KLO())
-
-MakeToggleBtn(otherPanel, "Fix Lag", "FixLag",
-    function() MovementAndWorld:StartFixLag() end,
-    function() MovementAndWorld:StopFixLag() end,
-    KLO())
-
--- ==========================================
--- THÔNG BÁO KHỞI ĐỘNG
--- ==========================================
-local function ShowNotif(msg, color)
-    local notif = Instance.new("Frame")
-    notif.Size             = UDim2.new(0, 280, 0, 36)
-    notif.Position         = UDim2.new(0.5, -140, 1, -50)
-    notif.BackgroundColor3 = color or Color3.fromRGB(40, 40, 80)
-    notif.BorderSizePixel  = 0
-    notif.Parent           = ScreenGui
-
-    local nc = Instance.new("UICorner")
-    nc.CornerRadius = UDim.new(0, 8)
-    nc.Parent = notif
-
-    local nl = Instance.new("TextLabel")
-    nl.Text              = msg
-    nl.Size              = UDim2.new(1, 0, 1, 0)
-    nl.BackgroundTransparency = 1
-    nl.TextColor3        = Color3.fromRGB(255, 255, 255)
-    nl.Font              = Enum.Font.GothamMedium
-    nl.TextSize          = 13
-    nl.Parent            = notif
-
-    task.delay(2.5, function()
-        TweenService:Create(notif, TweenInfo.new(0.4), {BackgroundTransparency = 1}):Play()
-        TweenService:Create(nl,    TweenInfo.new(0.4), {TextTransparency = 1}):Play()
-        task.wait(0.5)
-        notif:Destroy()
+-- Scan Range chung
+local scanRangeInput = createNumberInput(mainTab,
+    "Scan Range (studs)", State.Config.ScanRange, 10, 500,
+    function(v)
+        State.Config.ScanRange = v
+        Scanner._lastScanTick = 0 -- Force rescan
     end)
+scanRangeInput.LayoutOrder = 18
+scanRangeInput.Parent = mainTab
+
+-- ============================================================
+-- Tạo nội dung TAB ESP
+-- ============================================================
+local espTab = tabFrames["Esp"]
+
+local function espToggle(label, feature, lo)
+    createToggle(espTab, label, feature,
+        function()
+            if not EspEngine._connections["Render"] then
+                EspEngine.StartRenderLoop()
+            end
+        end,
+        function()
+            -- Tắt tính năng ESP cụ thể, loop vẫn chạy để cleanup
+        end, lo)
 end
 
-ShowNotif("✅ DebugGUI loaded! Phạm vi: 150 studs", Color3.fromRGB(40, 120, 40))
+espToggle("Esp Line (Đường kẻ)", "EspLine", 1)
+espToggle("Esp Box (Khung bao)", "EspBox", 2)
+espToggle("Esp Name (Tên mob)", "EspName", 3)
+espToggle("Esp Distance (Khoảng cách)", "EspDistance", 4)
+espToggle("Esp Hologram (Xuyên tường)", "EspHologram", 5)
 
--- ==========================================
--- DỌN DẸP KHI NHÂN VẬT RESPAWN
--- ==========================================
+-- ============================================================
+-- Tạo nội dung TAB KHÁC
+-- ============================================================
+local otherTab = tabFrames["Khác"]
+
+createToggle(otherTab, "Fly Down (Nằm ngửa)", "FlyDown",
+    MovementAndWorld.StartFlyDown,
+    MovementAndWorld.StopFlyDown, 1)
+
+createToggle(otherTab, "Fly Dron (Úp mặt xuống)", "FlyDron",
+    MovementAndWorld.StartFlyDron,
+    MovementAndWorld.StopFlyDron, 2)
+
+local flyDronHeightInput = createNumberInput(otherTab,
+    "Fly Dron Height", State.Config.FlyDronHeight, 1, 100,
+    function(v) State.Config.FlyDronHeight = v end)
+flyDronHeightInput.LayoutOrder = 3
+flyDronHeightInput.Parent = otherTab
+
+createToggle(otherTab, "No Clip (Xuyên tường)", "NoClip",
+    MovementAndWorld.StartNoClip,
+    MovementAndWorld.StopNoClip, 4)
+
+createToggle(otherTab, "Fly Air (Bay tự do)", "FlyAir",
+    MovementAndWorld.StartFlyAir,
+    MovementAndWorld.StopFlyAir, 5)
+
+local flySpeedInput = createNumberInput(otherTab,
+    "Fly Speed", State.Config.FlySpeed, 1, 200,
+    function(v) State.Config.FlySpeed = v end)
+flySpeedInput.LayoutOrder = 6
+flySpeedInput.Parent = otherTab
+
+createToggle(otherTab, "Speed (Tốc độ)", "Speed",
+    MovementAndWorld.StartSpeed,
+    MovementAndWorld.StopSpeed, 7)
+
+local speedInput = createNumberInput(otherTab,
+    "Walk Speed", State.Config.WalkSpeed, 1, 500,
+    function(v)
+        State.Config.WalkSpeed = v
+        if State:IsOn("Speed") then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = v end
+        end
+    end)
+speedInput.LayoutOrder = 8
+speedInput.Parent = otherTab
+
+createToggle(otherTab, "Jumping Air (Nhảy trên không)", "JumpingAir",
+    MovementAndWorld.StartJumpingAir,
+    MovementAndWorld.StopJumpingAir, 9)
+
+createToggle(otherTab, "Night Vision (Nhìn đêm)", "NightVision",
+    MovementAndWorld.StartNightVision,
+    MovementAndWorld.StopNightVision, 10)
+
+createToggle(otherTab, "Fix Lag (Tăng FPS)", "FixLag",
+    MovementAndWorld.StartFixLag,
+    MovementAndWorld.StopFixLag, 11)
+
+-- ============================================================
+-- Dọn dẹp hoàn toàn khi nhân vật respawn
+-- ============================================================
 LocalPlayer.CharacterAdded:Connect(function(char)
+    -- Tắt tất cả tính năng và dọn dẹp
+    State.States.TeleDron = false
+    State.States.HitboxAllMod = false
+    State.States.TeleKill = false
+    State.States.Aimbot = false
+    State.States.AllModIm = false
+    State.States.ModelDonTho = false
+    State.States.ModelHeadDown = false
+    State.States.PlayerBarrier = false
+    State.States.LongLegs = false
+    State.States.LongHead = false
+    State.States.FlyDown = false
+    State.States.FlyDron = false
+    State.States.NoClip = false
+    State.States.FlyAir = false
+    State.States.JumpingAir = false
+
+    CombatEngine.StopTeleDron()
+    CombatEngine.StopHitboxAllMod()
+    CombatEngine.StopTeleKill()
+    CombatEngine.StopAimbot()
+    CombatEngine.StopAllModIm()
+    CombatEngine.StopModelDonTho()
+    CombatEngine.StopModelHeadDown()
+    CombatEngine.StopPlayerBarrier()
+    CombatEngine.StopLongLegs()
+    CombatEngine.StopLongHead()
+    MovementAndWorld.StopFlyDown()
+    MovementAndWorld.StopFlyDron()
+    MovementAndWorld.StopNoClip()
+    MovementAndWorld.StopFlyAir()
+    MovementAndWorld.StopJumpingAir()
+
+    -- Scanner reset cache
+    Scanner._cache = {}
+    Scanner._lastScanTick = 0
+
+    -- Chờ nhân vật load xong rồi chạy lại
     char:WaitForChild("HumanoidRootPart", 10)
-    -- Reset các tính năng phụ thuộc vào nhân vật
-    if StateManager:IsOn("NoClip") then
-        task.wait(0.5)
-        MovementAndWorld:StartNoClip()
-    end
-    if StateManager:IsOn("Speed") then
-        task.wait(0.5)
-        MovementAndWorld:StartSpeed()
-    end
-    if StateManager:IsOn("FlyAir") then
-        task.wait(0.5)
-        MovementAndWorld:StartFlyAir()
-    end
-    ShowNotif("🔄 Character respawned - đã áp dụng lại tính năng")
 end)
 
--- ==========================================
--- PHÍM TẮT: INSERT để ẩn/hiện GUI
--- ==========================================
-UserInputService.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if input.KeyCode == Enum.KeyCode.Insert then
+-- ============================================================
+-- Phím tắt: RightShift để ẩn/hiện GUI
+-- ============================================================
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
         MainFrame.Visible = not MainFrame.Visible
     end
 end)
 
-print("[DebugGUI] Khởi động thành công! Nhấn INSERT để ẩn/hiện.")
-print("[DebugGUI] AttackHook: Chỉnh hàm CombatEngine.AttackHook() để kết nối cơ chế tấn công của game.")
+print("[DebugGUI] Đã tải xong. Nhấn RightShift để ẩn/hiện GUI.")
+print("[DebugGUI] Phím bay: W/S/A/D = di chuyển, E = lên, Q = xuống")
