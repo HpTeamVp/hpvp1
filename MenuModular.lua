@@ -280,46 +280,64 @@ local function applyScaledPart(part, size, offset)
 	part.CFrame = original.CFrame * CFrame.new(offset(original.Size))
 end
 
+local function destroyPlayerBarrier()
+	if barrierPart then
+		barrierPart:Destroy()
+		barrierPart = nil
+	end
+	barrierCharacter = nil
+end
+
 local function updatePlayerBarrier()
 	local character = LP.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	if not F.PlayerBarrier or not root then
-		if barrierPart then barrierPart:Destroy(); barrierPart = nil end
-		if barrierForceField then barrierForceField:Destroy(); barrierForceField = nil end
-		barrierCharacter = nil
+		destroyPlayerBarrier()
 		return
 	end
 
-	if barrierCharacter ~= character then
-		if barrierPart then barrierPart:Destroy() end
-		if barrierForceField then barrierForceField:Destroy() end
+	-- Build a hollow four-sided fence instead of a solid sphere. A sphere with
+	-- CanCollide=true encloses the character inside solid geometry, causing
+	-- physics to eject the character upward or sideways.
+	if barrierCharacter ~= character or not barrierPart or not barrierPart.Parent then
+		destroyPlayerBarrier()
 		barrierCharacter = character
-
-		-- Local visual indicator only. A client-created ForceField cannot
-		-- prevent damage that is validated and applied by the server.
-		barrierForceField = Instance.new("ForceField")
-		barrierForceField.Visible = true
-		barrierForceField.Parent = character
-
-		barrierPart = Instance.new("Part")
-		barrierPart.Name = "LocalPlayerBarrierVisual"
-		barrierPart.Shape = Enum.PartType.Ball
-		barrierPart.Material = Enum.Material.ForceField
-		barrierPart.Color = Color3.fromRGB(70, 170, 255)
-		barrierPart.Transparency = 0.78
-		barrierPart.Anchored = true
-		-- Client-side collision shell: may collide with locally simulated NPCs,
-		-- but cannot guarantee blocking server-owned/network-owned NPCs.
-		barrierPart.CanCollide = true
-		barrierPart.CanTouch = false
-		barrierPart.CanQuery = true
-		barrierPart.CastShadow = false
+		barrierPart = Instance.new("Model")
+		barrierPart.Name = "LocalPlayerBarrierFence"
 		barrierPart.Parent = Workspace
+		for i = 1, 4 do
+			local wall = Instance.new("Part")
+			wall.Name = "BarrierWall" .. i
+			wall.Anchored = true
+			wall.Material = Enum.Material.ForceField
+			wall.Color = Color3.fromRGB(70, 170, 255)
+			wall.Transparency = 0.78
+			wall.CanCollide = true
+			wall.CanTouch = false
+			wall.CanQuery = false
+			wall.CastShadow = false
+			wall.Parent = barrierPart
+		end
 	end
 
-	local diameter = Cfg.BarrierRadius * 2
-	barrierPart.Size = Vector3.new(diameter, diameter, diameter)
-	barrierPart.CFrame = root.CFrame
+	local radius = math.clamp(tonumber(Cfg.BarrierRadius) or 8, 3, 30)
+	local height = 9
+	local thickness = 0.45
+	local center = root.Position + Vector3.new(0, 1.5, 0)
+	local walls = barrierPart:GetChildren()
+	local placements = {
+		{ Vector3.new(0, 0, -radius), Vector3.new(radius * 2, height, thickness), 0 },
+		{ Vector3.new(0, 0, radius), Vector3.new(radius * 2, height, thickness), 0 },
+		{ Vector3.new(-radius, 0, 0), Vector3.new(thickness, height, radius * 2), 0 },
+		{ Vector3.new(radius, 0, 0), Vector3.new(thickness, height, radius * 2), 0 },
+	}
+	for i, wall in ipairs(walls) do
+		local data = placements[i]
+		if wall:IsA("BasePart") and data then
+			wall.Size = data[2]
+			wall.CFrame = CFrame.new(center + data[1])
+		end
+	end
 end
 
 local function applyMobShapes(model)
