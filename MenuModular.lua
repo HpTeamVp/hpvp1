@@ -65,7 +65,7 @@ local State = {
 		DroneHeight = 6,      -- Fly Dron mặc định 6
 		FlyDownDepth = 6,     -- độ sâu dưới mặt đất (Fly Down)
 		FlySpeed = 60, WalkSpeed = 40,
-		UndergroundDepth = 15, UndergroundRange = 150, HeadDownRange = 150, -- Model Độn Thổ / Model head down
+		UndergroundDepth = 15, UndergroundRange = 150, HeadDownRange = 150, HeadBuryRatio = 0.3, -- tỉ lệ chiều cao bị chôn (đầu -> vai) -- Model Độn Thổ / Model head down
 		HitboxSize = 25, AimSmooth = 0.35, AttackInterval = 0.12, HoverRate = 15,
 	},
 	Runtime = { Vertical = 0 }, -- -1 / 0 / 1: nút giữ để tăng/giảm độ cao
@@ -242,6 +242,59 @@ local function restoreHitbox(root)
 	hbOrig[root] = nil
 end
 
+-- Block: VÔ HIỆU HÓA TẤN CÔNG của mob ---------------------------------------
+-- Phía client: tắt Tool, tắt CanTouch (đòn chạm), tắt LocalScript của mob, dừng animation đòn đánh.
+-- Phía server (thật sự chặn sát thương): nếu có RemoteEvent ReplicatedStorage.DebugDisableAttack
+-- (xem file DebugDisableAttack.server.lua) thì client báo cho server bật/tắt cờ + vô hiệu hóa mob đó.
+local Block = { orig = setmetatable({}, { __mode = "k" }) }
+local ACTION_PRIORITY = {
+	[Enum.AnimationPriority.Action] = true, [Enum.AnimationPriority.Action2] = true,
+	[Enum.AnimationPriority.Action3] = true, [Enum.AnimationPriority.Action4] = true,
+}
+local function blockRemote()
+	return game:GetService("ReplicatedStorage"):FindFirstChild("DebugDisableAttack")
+end
+
+function Block.apply(model, hum)
+	local o = Block.orig[model]
+	if not o then -- lần đầu: snapshot giá trị gốc để trả lại khi tắt
+		o = { tools = {}, parts = {}, scripts = {} }
+		Block.orig[model] = o
+		for _, d in model:GetDescendants() do
+			if d:IsA("Tool") then
+				o.tools[d] = d.Enabled
+			elseif d:IsA("BasePart") then
+				o.parts[d] = d.CanTouch
+			elseif d:IsA("LocalScript") then
+				o.scripts[d] = d.Enabled
+			end
+		end
+		local r = blockRemote()
+		if r then pcall(function() r:FireServer(model, true) end) end
+	end
+	for tool in pairs(o.tools) do if tool.Parent then tool.Enabled = false end end
+	for p in pairs(o.parts) do if p.Parent and p.CanTouch then p.CanTouch = false end end
+	for s in pairs(o.scripts) do if s.Parent then pcall(function() s.Enabled = false end) end end
+	-- dừng animation đòn đánh (priority Action); animation chạy/đứng (Core/Movement/Idle) giữ nguyên
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+	if animator then
+		for _, track in animator:GetPlayingAnimationTracks() do
+			if ACTION_PRIORITY[track.Priority] then track:Stop(0) end
+		end
+	end
+end
+
+function Block.release(model)
+	local o = Block.orig[model]
+	if not o then return end
+	Block.orig[model] = nil
+	for tool, v in pairs(o.tools) do if tool.Parent then tool.Enabled = v end end
+	for p, v in pairs(o.parts) do if p.Parent then p.CanTouch = v end end
+	for s, v in pairs(o.scripts) do if s.Parent then pcall(function() s.Enabled = v end) end end
+	local r = blockRemote()
+	if r and model.Parent then pcall(function() r:FireServer(model, false) end) end
+end
+
 -- Model Độn Thổ / Model head down -------------------------------------------
 -- poses[model] = { cf = pivot gốc, groundY, size, hum, ws, jp, jh, ar, ps, parts = {part -> {CanCollide, Massless}} }
 local poses = setmetatable({}, { __mode = "k" })
@@ -257,6 +310,7 @@ local function restorePose(model, entry)
 	for p, o in pairs(entry.parts) do
 		if p.Parent then p.CanCollide, p.Massless = o[1], o[2] end
 	end
+	if not F.DisableAttack then Block.release(model) end -- trả lại khả năng tấn công (trừ khi đang bật Vô hiệu tấn công riêng)
 	-- trả về đúng độ cao + hướng ban đầu (giữ X/Z hiện tại vì server có thể đã đẩy mob đi)
 	local cur = model:GetPivot().Position
 	model:PivotTo(entry.cf.Rotation + Vector3.new(cur.X, entry.cf.Y, cur.Z))
@@ -301,14 +355,17 @@ local function poseStep()
 			if wantUnder then
 				newCf = e.cf.Rotation + Vector3.new(px, e.groundY - Cfg.UndergroundDepth, pz)
 			else
-				-- Đảo ngược 180° quanh trục X: đầu chúc xuống đất, thân/chân còn ở vị trí cũ.
-				-- Tâm model = groundY + nửa chiều cao - 1.5 => đầu cắm sâu ~1.5 stud dưới mặt đất
-				local cy = e.groundY + e.size.Y / 2 - 1.5
+				-- Đảo ngược 180° quanh trục X: đầu chúc xuống đất, nửa thân + chân còn nhô lên ở vị trí cũ.
+				-- Phần bị chôn = HeadBuryRatio * chiều cao (đầu -> vai, mặc định 30%).
+				-- Tâm model = groundY + nửa chiều cao - phần chôn => đỉnh đầu chìm đúng độ sâu đó
+				local buried = e.size.Y * math.clamp(Cfg.HeadBuryRatio, 0.05, 0.9)
+				local cy = e.groundY + e.size.Y / 2 - buried
 				newCf = CFrame.new(px, cy, pz) * (e.cf.Rotation * CFrame.Angles(math.pi, 0, 0))
 			end
 			for p, o in pairs(e.parts) do
 				if p.Parent then p.CanCollide, p.Massless = false, true end -- không va chạm => không bị hất văng lên trời
 			end
+			Block.apply(t.model, t.hum) -- mob bị chôn/độn thổ cũng mất khả năng tấn công
 			t.model:PivotTo(newCf)
 			t.root.AssemblyLinearVelocity = Vector3.zero
 			t.root.AssemblyAngularVelocity = Vector3.zero
@@ -350,6 +407,7 @@ end
 local imAnchor = setmetatable({}, { __mode = "k" }) -- model -> {pos, rot, hum, ar}
 local function releaseIm(e)
 	if e.hum and e.hum.Parent then e.hum.AutoRotate = e.ar end
+	if e.model and not F.DisableAttack and not poses[e.model] then Block.release(e.model) end
 end
 local function imStep()
 	local active = {}
@@ -358,10 +416,11 @@ local function imStep()
 			active[t.model] = true
 			local a = imAnchor[t.model]
 			if not a then
-				a = { pos = t.root.Position, rot = t.root.CFrame.Rotation, hum = t.hum, ar = t.hum.AutoRotate }
+				a = { pos = t.root.Position, rot = t.root.CFrame.Rotation, hum = t.hum, ar = t.hum.AutoRotate, model = t.model }
 				imAnchor[t.model] = a
 			end
 			t.hum.AutoRotate = false -- không tự xoay về phía người chơi
+			Block.apply(t.model, t.hum) -- không thể tấn công người chơi
 			local cur = t.root.Position
 			-- ghim X/Z + hướng gốc (không xoay được); Y để vật lý xử lý nên mob vẫn đứng trên đất
 			t.root.CFrame = a.rot + Vector3.new(a.pos.X, cur.Y, a.pos.Z)
@@ -375,7 +434,28 @@ local function imStep()
 	end
 end
 
+-- Vô hiệu hóa tấn công (độc lập): áp cho mọi mob trong phạm vi quét, thả khi ra tầm / chết
+local function blockStep()
+	local active = {}
+	for _, t in Scanner.get() do
+		active[t.model] = true
+		Block.apply(t.model, t.hum)
+	end
+	for m in pairs(Block.orig) do
+		-- mob đang do pose / All Mod Im giữ thì không thả ở đây
+		if not active[m] and not poses[m] and not imAnchor[m] then Block.release(m) end
+	end
+end
+
 local function updateCombatConns()
+	if F.DisableAttack then
+		Conn.set("block", RunService.Heartbeat, blockStep)
+	else
+		Conn.drop("block")
+		for m in pairs(Block.orig) do
+			if not poses[m] and not imAnchor[m] then Block.release(m) end
+		end
+	end
 	if F.AllModIm then
 		Conn.set("im", RunService.Heartbeat, imStep)
 	else
@@ -397,7 +477,7 @@ local function updateCombatConns()
 		clearPoses() -- trả mob về nguyên trạng khi tắt
 	end
 end
-for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm", "ModelUnderground", "ModelHeadDown" } do
+for _, f in { "TeleDron", "TeleKill", "Aimbot", "HitboxAll", "AllModIm", "DisableAttack", "ModelUnderground", "ModelHeadDown" } do
 	State.listen(f, function()
 		if not (F.TeleDron or F.TeleKill) then Combat.lock = nil end
 		updateCombatConns()
@@ -956,6 +1036,7 @@ toggleRow("Main", "Tele Dron", "TeleDron")
 numberRow("Main", "  An toàn Tele Dron", "SafeHeight", 3, 100)
 toggleRow("Main", "Hitbox All Mod", "HitboxAll")
 numberRow("Main", "  Cỡ Hitbox", "HitboxSize", 2, 200)
+toggleRow("Main", "Vô hiệu tấn công", "DisableAttack")
 toggleRow("Main", "All Mod Im", "AllModIm")
 toggleRow("Main", "Tele Kill", "TeleKill")
 toggleRow("Main", "Aimbot", "Aimbot")
@@ -964,6 +1045,7 @@ numberRow("Main", "  Phạm vi Độn Thổ", "UndergroundRange", 5, 500)
 numberRow("Main", "  Độ sâu Độn Thổ", "UndergroundDepth", 2, 200)
 toggleRow("Main", "Model head down", "ModelHeadDown")
 numberRow("Main", "  Phạm vi head down", "HeadDownRange", 5, 500)
+numberRow("Main", "  Tỉ lệ chôn (0.1-0.9)", "HeadBuryRatio", 0.1, 0.9)
 numberRow("Main", "  Phạm vi quét", "ScanRange", 10, 500)
 
 toggleRow("Esp", "Esp Line", "EspLine")
