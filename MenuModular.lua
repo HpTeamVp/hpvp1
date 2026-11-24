@@ -1,1227 +1,929 @@
 --[[
-	DEBUG PANEL (LocalScript) - 3 tab: Main / Esp / Khác
-	Đặt vào StarterPlayer > StarterPlayerScripts (hoặc dán vào Delta để test).
-	Chỉ dùng trong game của bạn.
+	DEBUG / TEST PANEL (LocalScript) - 3 tab: Main | Esp | Khác
+	Đặt vào StarterPlayer > StarterPlayerScripts (dùng để test trong game của bạn / Studio).
+	Cấu trúc: StateManager, TargetScanner, CombatEngine, EspEngine, MovementAndWorld, UIController.
 
-	CÁCH CẮM CƠ CHẾ TẤN CÔNG CỦA GAME:
-	Sửa hàm Combat.AttackHook(target, mode) ở module CombatEngine.
-	  target = { model = Model, hum = Humanoid, root = BasePart, dist = number }
-	  mode   = "TeleDron" | "TeleKill"
-	Ví dụ:
-	  - Tool client:   tool:Activate()                    (mặc định bên dưới)
-	  - RemoteEvent:   game.ReplicatedStorage.Hit:FireServer(target.model)
-	  - Skill/Key:     game.ReplicatedStorage.Skill:FireServer("Slash", target.root.Position)
-	Lưu ý: máu mob do SERVER quản lý. Các chế độ chỉnh model mob (Im / Độn Thổ / Head Down /
-	Hitbox mob) chỉ đổi phía client, server vẫn dùng vị trí thật nếu mob do server điều khiển.
+	LƯU Ý QUAN TRỌNG:
+	- Script chạy phía client. Thay đổi lên Model của mob (kích thước, vị trí, Anchored...) chỉ có tác dụng
+	  cục bộ; sát thương / AI / tấn công mob luôn do SERVER quyết định. Muốn chặn mob đánh người chơi,
+	  hoặc nhận sát thương theo hitbox mở rộng thật sự thì phải làm thêm phía server (RemoteEvent kiểm tra).
+	- Cắm cơ chế đánh của game vào: CombatEngine.AttackHook(target, mode)  (xem phần CombatEngine).
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
 
 local LP = Players.LocalPlayer
-local PlayerGui = LP:WaitForChild("PlayerGui")
+local Camera = Workspace.CurrentCamera
 
--- Dọn bản cũ nếu chạy lại script
-for _, n in ipairs({ "DbgPanel", "DbgEsp" }) do
-	local o = PlayerGui:FindFirstChild(n)
-	if o then o:Destroy() end
+---------------------------------------------------------------------
+-- Tiện ích chung
+---------------------------------------------------------------------
+local function getChar()
+	local ch = LP.Character
+	if not ch then return end
+	local hum = ch:FindFirstChildOfClass("Humanoid")
+	local root = ch:FindFirstChild("HumanoidRootPart")
+	if hum and root and hum.Health > 0 then return ch, hum, root end
 end
-local oldHL = Workspace:FindFirstChild("DbgEspHL")
-if oldHL then oldHL:Destroy() end
 
--- ===================== TIỆN ÍCH =====================
-local function cam() return Workspace.CurrentCamera end
 local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
 
--- Trả về: character, HumanoidRootPart, Humanoid (nil nếu chưa có)
-local function me()
-	local c = LP.Character
-	if not c then return end
-	return c, c:FindFirstChild("HumanoidRootPart"), c:FindFirstChildOfClass("Humanoid")
+---------------------------------------------------------------------
+-- 1) StateManager: cờ bật/tắt, cấu hình, snapshot, janitor chống rò rỉ kết nối
+---------------------------------------------------------------------
+local State = {
+	Config = {
+		ScanRange = 150, SafeHeight = 12, FlySpeed = 60, WalkSpeed = 16,
+		DroneHeight = 6, DownDepth = 8, HitboxSize = 15, UndergroundDepth = 30,
+		HeadDepth = 6, LongLegs = 40, BarrierRadius = 12, AimSmooth = 0.35,
+		AttackInterval = 0.15,
+	},
+	Flags = {},      -- [tên] = bool
+	Handlers = {},   -- [tên] = {start=fn, stop=fn}
+	Snap = {},       -- [tên] = bảng giá trị gốc
+	Janitors = {},
+	OnChanged = {},  -- callback UI
+}
+
+-- Janitor: gom kết nối/Instance/hàm để dọn sạch khi tắt tính năng
+local function newJanitor()
+	local j = { items = {} }
+	function j:Add(x) table.insert(self.items, x) return x end
+	function j:Clean()
+		for _, x in ipairs(self.items) do
+			local t = typeof(x)
+			if t == "RBXScriptConnection" then x:Disconnect()
+			elseif t == "Instance" then pcall(function() x:Destroy() end)
+			elseif t == "function" then pcall(x) end
+		end
+		table.clear(self.items)
+	end
+	return j
 end
 
-local function new(cls, props, parent)
-	local o = Instance.new(cls)
-	for k, v in pairs(props) do o[k] = v end
-	o.Parent = parent
-	return o
+function State.Janitor(name)
+	State.Janitors[name] = State.Janitors[name] or newJanitor()
+	return State.Janitors[name]
 end
 
--- Maid: gom kết nối/instance/hàm dọn dẹp để không rò rỉ khi bật/tắt nhiều lần
-local Maid = {}
-Maid.__index = Maid
-function Maid.new() return setmetatable({ _t = {} }, Maid) end
-function Maid:Add(x)
-	table.insert(self._t, x)
-	return x
+function State.Register(name, startFn, stopFn)
+	State.Flags[name] = false
+	State.Handlers[name] = { start = startFn, stop = stopFn }
 end
-function Maid:Clean()
-	for _, x in ipairs(self._t) do
-		local ty = typeof(x)
-		if ty == "RBXScriptConnection" then
-			x:Disconnect()
-		elseif ty == "Instance" then
-			x:Destroy()
-		elseif ty == "function" then
-			pcall(x)
+
+function State.Set(name, on)
+	local h = State.Handlers[name]
+	if not h or State.Flags[name] == on then return end
+	State.Flags[name] = on
+	if on then
+		local ok, err = pcall(h.start)
+		if not ok then
+			warn("[DebugPanel] lỗi bật " .. name .. ": " .. tostring(err))
+			State.Flags[name] = false
+			pcall(h.stop)
+			State.Janitor(name):Clean()
+		end
+	else
+		pcall(h.stop)
+		State.Janitor(name):Clean()
+	end
+	for _, cb in ipairs(State.OnChanged) do pcall(cb, name) end
+end
+
+function State.Toggle(name) State.Set(name, not State.Flags[name]) end
+
+---------------------------------------------------------------------
+-- 2) TargetScanner: theo dõi Humanoid bằng sự kiện + quét có giới hạn tần suất
+---------------------------------------------------------------------
+local Scanner = { Humanoids = {}, Targets = {}, _last = 0, Interval = 0.1 }
+
+local function track(inst)
+	if inst:IsA("Humanoid") then Scanner.Humanoids[inst] = true end
+end
+task.spawn(function()
+	local n = 0
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		track(d)
+		n += 1
+		if n % 2000 == 0 then task.wait() end -- yield để không treo khung hình
+	end
+end)
+Workspace.DescendantAdded:Connect(track)
+Workspace.DescendantRemoving:Connect(function(i) Scanner.Humanoids[i] = nil end)
+
+-- Kiểm tra 1 Model còn hợp lệ & trong tầm không. Trả về hum, root, dist
+function Scanner.Check(model)
+	if not model or not model.Parent then return end
+	if model == LP.Character then return end
+	if Players:GetPlayerFromCharacter(model) then return end -- bỏ qua người chơi khác
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return end
+	local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+	if not root then return end
+	local _, _, myRoot = getChar()
+	if not myRoot then return end
+	local dist = (root.Position - myRoot.Position).Magnitude
+	if dist > State.Config.ScanRange then return end
+	return hum, root, dist
+end
+
+function Scanner.Scan(force)
+	local now = os.clock()
+	if not force and now - Scanner._last < Scanner.Interval then return Scanner.Targets end
+	Scanner._last = now
+	local list = {}
+	for hum in pairs(Scanner.Humanoids) do
+		local model = hum.Parent
+		if model and model:IsA("Model") then
+			local h, root, dist = Scanner.Check(model)
+			if h then table.insert(list, { Model = model, Hum = h, Root = root, Dist = dist }) end
 		end
 	end
-	table.clear(self._t)
+	table.sort(list, function(a, b) return a.Dist < b.Dist end) -- ưu tiên gần nhất
+	Scanner.Targets = list
+	return list
 end
 
--- ===================== MODULE: StateManager =====================
-local State = {
-	Flags = {},
-	Snap = {},
-	_l = {},
-	Cfg = {
-		ScanRange = 150, ModRange = 150,
-		SafeHeight = 15, KillOffset = 4,
-		DroneHeight = 6, DownDepth = 8,
-		FlySpeed = 50, WalkSpeed = 32,
-		HitboxSize = 12, BurrowDepth = 12, HeadBury = 4,
-		AttackInterval = 0.15, AimSmooth = 0.35,
-	},
-	Range = {
-		ScanRange = { 10, 500 }, ModRange = { 10, 500 },
-		SafeHeight = { 3, 80 }, KillOffset = { 1, 20 },
-		DroneHeight = { 1, 100 }, DownDepth = { 2, 100 },
-		FlySpeed = { 5, 300 }, WalkSpeed = { 1, 300 },
-		HitboxSize = { 2, 60 }, BurrowDepth = { 2, 100 }, HeadBury = { 0.5, 20 },
-	},
-}
--- Các tính năng trong cùng nhóm không chạy cùng lúc (tránh tranh chấp CFrame/Velocity)
-local GROUPS = {
-	{ "TeleDron", "TeleKill", "FlyAir", "FlyDron", "FlyDown" },
-	{ "AllModIm", "ModelDonTho", "ModelHeadDown" },
-}
+---------------------------------------------------------------------
+-- 3) CombatEngine
+---------------------------------------------------------------------
+local Combat = { Target = nil, _lastAtk = 0 }
 
-function State:Get(f) return self.Flags[f] == true end
+--[[ CẮM CƠ CHẾ TẤN CÔNG CỦA GAME TẠI ĐÂY:
+	target = {Model, Hum, Root, Dist}; mode = "Dron" | "Kill" | ...
+	Ví dụ: ReplicatedStorage.Remotes.Attack:FireServer(target.Model)
+	hoặc gọi skill: SkillRemote:FireServer("Slash", target.Root.Position)
+	Mặc định: kích hoạt Tool đang cầm. ]]
+Combat.AttackHook = function(target, mode)
+	local ch = LP.Character
+	local tool = ch and ch:FindFirstChildOfClass("Tool")
+	if tool then pcall(function() tool:Activate() end) end
+end
 
-function State:_fire(key, ...)
-	for _, fn in ipairs(self._l[key] or {}) do
-		local ok, err = pcall(fn, ...)
-		if not ok then warn("[Panel]", key, err) end
+function Combat.Attack(target, mode)
+	local now = os.clock()
+	if now - Combat._lastAtk < State.Config.AttackInterval then return end
+	Combat._lastAtk = now
+	local ok, err = pcall(Combat.AttackHook, target, mode)
+	if not ok then warn("[AttackHook] " .. tostring(err)) end
+end
+
+-- Khóa mục tiêu tạm thời: giữ mục tiêu tới khi chết / biến mất / ra khỏi 150 mới đổi
+function Combat.Lock()
+	local t = Combat.Target
+	if t then
+		local h, root, dist = Scanner.Check(t.Model)
+		if h then t.Hum, t.Root, t.Dist = h, root, dist return t end
+	end
+	Combat.Target = Scanner.Scan(true)[1]
+	return Combat.Target
+end
+
+local function zeroVel(root)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+end
+
+-- Tele Dron: lơ lửng phía trên mục tiêu, nhìn xuống và đánh
+State.Register("Tele Dron", function()
+	local j = State.Janitor("Tele Dron")
+	local _, hum = getChar()
+	local snap = { PlatformStand = hum and hum.PlatformStand }
+	State.Snap["Tele Dron"] = snap
+	j:Add(RunService.Heartbeat:Connect(function()
+		local ch, h, root = getChar()
+		if not ch then return end
+		local t = Combat.Lock()
+		if not t then return end
+		h.PlatformStand = true
+		local p = t.Root.Position + Vector3.new(0, State.Config.SafeHeight, 0)
+		root.CFrame = CFrame.lookAt(p, t.Root.Position) -- bám theo + nhìn xuống
+		zeroVel(root) -- triệt tiêu lực rơi / đẩy lùi
+		Combat.Attack(t, "Dron")
+	end))
+	j:Add(function()
+		local _, h = getChar()
+		if h and snap.PlatformStand ~= nil then h.PlatformStand = snap.PlatformStand end
+	end)
+end, function() end)
+
+-- Tele Kill: dịch chuyển tới sau lưng mục tiêu rồi đánh, tự đổi mục tiêu khi chết
+State.Register("Tele Kill", function()
+	local j = State.Janitor("Tele Kill")
+	j:Add(RunService.Heartbeat:Connect(function()
+		local ch, _, root = getChar()
+		if not ch then return end
+		local t = Combat.Lock()
+		if not t then return end
+		local tcf = t.Root.CFrame
+		root.CFrame = CFrame.lookAt((tcf * CFrame.new(0, 0, 4)).Position, t.Root.Position)
+		zeroVel(root)
+		Combat.Attack(t, "Kill")
+	end))
+end, function() end)
+
+-- Aimbot: xoay Camera mượt về mục tiêu (lerp chống giật khi đổi mục tiêu)
+State.Register("Aimbot", function()
+	local j = State.Janitor("Aimbot")
+	RunService:BindToRenderStep("DebugPanelAim", Enum.RenderPriority.Camera.Value + 1, function()
+		local t = Combat.Lock()
+		if not t then return end
+		local cam = Workspace.CurrentCamera
+		local goal = CFrame.lookAt(cam.CFrame.Position, t.Root.Position)
+		cam.CFrame = cam.CFrame:Lerp(goal, State.Config.AimSmooth)
+	end)
+	j:Add(function() RunService:UnbindFromRenderStep("DebugPanelAim") end)
+end, function() end)
+
+-- Hitbox All Mod: phóng to HumanoidRootPart của mob (cục bộ) + vẽ hộp bao
+local HB = {}
+local function hbRestore(root)
+	local s = HB[root]
+	if not s then return end
+	HB[root] = nil
+	if root.Parent then
+		root.Size, root.Transparency, root.CanCollide, root.Massless = s.Size, s.Transp, s.Collide, s.Massless
+	end
+	if s.Box then s.Box:Destroy() end
+end
+State.Register("Hitbox All Mod", function()
+	local j = State.Janitor("Hitbox All Mod")
+	j:Add(RunService.Heartbeat:Connect(function()
+		local inRange = {}
+		for _, t in ipairs(Scanner.Scan()) do
+			local r = t.Root
+			inRange[r] = true
+			local size = State.Config.HitboxSize
+			if not HB[r] then
+				local box = Instance.new("BoxHandleAdornment")
+				box.Adornee, box.AlwaysOnTop, box.ZIndex = r, true, 2
+				box.Transparency, box.Color3 = 0.7, Color3.fromRGB(255, 70, 70)
+				box.Parent = r
+				HB[r] = { Size = r.Size, Transp = r.Transparency, Collide = r.CanCollide, Massless = r.Massless, Box = box }
+			end
+			-- hộp cao hơn để phủ cả vùng dưới đất; CanCollide=false để xuyên tường/vật cản
+			r.Size = Vector3.new(size, size * 1.5, size)
+			r.CanCollide, r.Massless, r.Transparency = false, true, 1
+			HB[r].Box.Size = r.Size
+		end
+		for r in pairs(HB) do
+			if not inRange[r] or not r.Parent then hbRestore(r) end
+		end
+	end))
+	j:Add(function() for r in pairs(HB) do hbRestore(r) end end)
+end, function() end)
+
+-- Điều khiển Model: All Mod Im / Độn Thổ / Head Down (dùng chung snapshot pivot)
+local Mods = {}
+local function modRestore(model)
+	local s = Mods[model]
+	if not s then return end
+	Mods[model] = nil
+	if model.Parent then
+		pcall(function() model:PivotTo(s.Pivot) end)
+		if s.Root.Parent then s.Root.Anchored = s.Anchored end
+		if s.Hum.Parent then s.Hum.WalkSpeed, s.Hum.AutoRotate = s.WalkSpeed, s.AutoRotate end
 	end
 end
-
-function State:Bind(key, fn)
-	self._l[key] = self._l[key] or {}
-	table.insert(self._l[key], fn)
+local function modRefresh()
+	local F = State.Flags
+	local active = F["All Mod Im"] or F["Model Độn Thổ"] or F["Model head down"]
+	local inRange = {}
+	if active then
+		for _, t in ipairs(Scanner.Scan()) do
+			local m = t.Model
+			inRange[m] = true
+			if not Mods[m] then
+				Mods[m] = { Pivot = m:GetPivot(), Root = t.Root, Hum = t.Hum, Anchored = t.Root.Anchored,
+					WalkSpeed = t.Hum.WalkSpeed, AutoRotate = t.Hum.AutoRotate }
+			end
+			local s = Mods[m]
+			t.Hum.WalkSpeed, t.Hum.AutoRotate = 0, false
+			s.Root.Anchored = true -- đứng yên, không xoay
+			local cf = s.Pivot
+			if F["Model Độn Thổ"] then
+				cf = s.Pivot - Vector3.new(0, State.Config.UndergroundDepth, 0)
+			elseif F["Model head down"] then
+				-- lật ngược (đầu xuống) và hạ thấp để đầu-vai cắm vào đất
+				cf = CFrame.new(s.Pivot.Position - Vector3.new(0, State.Config.HeadDepth, 0))
+					* s.Pivot.Rotation * CFrame.Angles(math.pi, 0, 0)
+			end
+			m:PivotTo(cf)
+		end
+	end
+	for m in pairs(Mods) do
+		if not inRange[m] then modRestore(m) end
+	end
 end
+local function registerMod(name)
+	State.Register(name, function()
+		local j = State.Janitor(name)
+		j:Add(RunService.Heartbeat:Connect(modRefresh))
+		j:Add(function()
+			task.defer(function() -- sau khi cờ đã tắt: khôi phục hoặc cập nhật theo cờ còn lại
+				local F = State.Flags
+				if not (F["All Mod Im"] or F["Model Độn Thổ"] or F["Model head down"]) then
+					for m in pairs(Mods) do modRestore(m) end
+				end
+			end)
+		end)
+	end, function() end)
+end
+registerMod("All Mod Im"); registerMod("Model Độn Thổ"); registerMod("Model head down")
 
-function State:Set(flag, on)
-	on = on == true
-	if self:Get(flag) == on then return end
-	if on then
-		for _, g in ipairs(GROUPS) do
-			if table.find(g, flag) then
-				for _, o in ipairs(g) do
-					if o ~= flag then self:Set(o, false) end
+-- Player Barrier: vòng rào vô hình quanh người chơi (không va chạm với chính mình)
+State.Register("Player Barrier", function()
+	local j = State.Janitor("Player Barrier")
+	local folder = j:Add(Instance.new("Folder"))
+	folder.Name = "PB_Barrier"; folder.Parent = Workspace
+	local walls, N = {}, 12
+	for i = 1, N do
+		local w = Instance.new("Part")
+		w.Anchored, w.CanCollide, w.CanQuery, w.Transparency = true, true, false, 1
+		w.Size = Vector3.new(2 * State.Config.BarrierRadius * math.tan(math.pi / N) + 1, 16, 1)
+		w.Parent = folder
+		walls[i] = w
+	end
+	local linked = {}
+	j:Add(RunService.Heartbeat:Connect(function()
+		local ch, _, root = getChar()
+		if not ch then return end
+		for _, d in ipairs(ch:GetDescendants()) do -- không va chạm với thân mình
+			if d:IsA("BasePart") and not linked[d] then
+				linked[d] = true
+				for _, w in ipairs(walls) do
+					local c = Instance.new("NoCollisionConstraint")
+					c.Part0, c.Part1, c.Parent = d, w, w
 				end
 			end
 		end
-	end
-	self.Flags[flag] = on
-	self:_fire(flag, on)
-	self:_fire("*", flag, on)
-end
-
-function State:SetCfg(k, v)
-	if type(v) ~= "number" or v ~= v then return false end
-	local r = self.Range[k]
-	if r then v = clamp(v, r[1], r[2]) end
-	self.Cfg[k] = v
-	self:_fire("cfg", k, v)
-	return true
-end
-
--- Snapshot giá trị gốc (chỉ lưu lần đầu), Take = lấy ra và xoá
-function State:Save(k, v)
-	if self.Snap[k] == nil then self.Snap[k] = { v = v } end
-end
-function State:Take(k)
-	local s = self.Snap[k]
-	self.Snap[k] = nil
-	if s then return s.v end
-end
-
--- Mỗi tính năng có 1 Maid riêng: bật tạo mới, tắt dọn sạch
-local Features = {}
-local function feature(flag, enable)
-	State:Bind(flag, function(on)
-		local old = Features[flag]
-		if old then
-			old:Clean()
-			Features[flag] = nil
+		for i, w in ipairs(walls) do
+			local a = (i / N) * math.pi * 2
+			local off = Vector3.new(math.cos(a), 0, math.sin(a)) * State.Config.BarrierRadius
+			w.CFrame = CFrame.lookAt(root.Position + off, root.Position)
 		end
-		if on then
-			local m = Maid.new()
-			Features[flag] = m
-			local ok, err = pcall(enable, m)
-			if not ok then
-				warn("[Panel] Lỗi bật " .. flag .. ": " .. tostring(err))
-				m:Clean()
-				Features[flag] = nil
-				task.defer(State.Set, State, flag, false)
+	end))
+end, function() end)
+
+-- Long Legs: kéo dài chân mob xuống lòng đất (cục bộ) để dễ đánh trúng
+local LEG = { LeftLowerLeg = 1, RightLowerLeg = 1, ["Left Leg"] = 1, ["Right Leg"] = 1 }
+local Legs = {}
+local function legRestore(model)
+	local s = Legs[model]
+	if not s then return end
+	Legs[model] = nil
+	for part, size in pairs(s) do if part.Parent then part.Size = size end end
+end
+State.Register("Long Legs", function()
+	local j = State.Janitor("Long Legs")
+	j:Add(RunService.Heartbeat:Connect(function()
+		local inRange = {}
+		for _, t in ipairs(Scanner.Scan()) do
+			local m = t.Model
+			inRange[m] = true
+			if not Legs[m] then
+				local s = {}
+				for _, p in ipairs(m:GetChildren()) do
+					if p:IsA("BasePart") and LEG[p.Name] then s[p] = p.Size end
+				end
+				Legs[m] = s
+			end
+			for p, orig in pairs(Legs[m]) do
+				if p.Parent then p.Size = Vector3.new(orig.X, orig.Y + State.Config.LongLegs, orig.Z) end
 			end
 		end
-	end)
+		for m in pairs(Legs) do if not inRange[m] or not m.Parent then legRestore(m) end end
+	end))
+	j:Add(function() for m in pairs(Legs) do legRestore(m) end end)
+end, function() end)
+
+---------------------------------------------------------------------
+-- 4) EspEngine: vẽ bằng ScreenGui (an toàn, không cần Drawing API)
+---------------------------------------------------------------------
+local Esp = { Entries = {}, Gui = nil }
+
+local function makeGui()
+	local g = Instance.new("ScreenGui")
+	g.Name, g.ResetOnSpawn, g.IgnoreGuiInset, g.DisplayOrder = "DebugPanelEsp", false, true, 5
+	g.Parent = LP:WaitForChild("PlayerGui")
+	return g
 end
 
--- ===================== MODULE: TargetScanner =====================
-local Scanner = { Cand = {}, List = {}, _acc = 0 }
-
--- Kiểm tra Humanoid hợp lệ: NPC/Mob còn sống, không phải người chơi, có root
-function Scanner:Check(hum)
-	if not hum or not hum.Parent then return nil end
-	local m = hum.Parent
-	if not m:IsA("Model") or hum.Health <= 0 then return nil end
-	if m == LP.Character or Players:GetPlayerFromCharacter(m) then return nil end
-	local r = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-	if not r or not r:IsA("BasePart") then return nil end
-	return m, r
+local function espDestroyPart(e, key)
+	if e[key] then e[key]:Destroy(); e[key] = nil end
 end
 
--- Làm mới danh sách (throttle 0.1s). List chứa mục tiêu trong max(range)+25, đã sắp xếp theo khoảng cách.
-function Scanner:Refresh()
-	local _, hrp = me()
-	if not hrp then
-		self.List = {}
+function Esp.Cleanup(model)
+	local e = Esp.Entries[model]
+	if not e then return end
+	for _, k in ipairs({ "Line", "Box", "Name", "Dist", "Hl" }) do espDestroyPart(e, k) end
+	Esp.Entries[model] = nil
+end
+
+local function boxCorners(model)
+	local cf, size = model:GetBoundingBox()
+	local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+	for x = -1, 1, 2 do for y = -1, 1, 2 do for z = -1, 1, 2 do
+		local v, vis = Camera:WorldToViewportPoint((cf * CFrame.new(size.X / 2 * x, size.Y / 2 * y, size.Z / 2 * z)).Position)
+		if v.Z <= 0 then return end -- phía sau camera
+		minX, minY = math.min(minX, v.X), math.min(minY, v.Y)
+		maxX, maxY = math.max(maxX, v.X), math.max(maxY, v.Y)
+	end end end
+	return minX, minY, maxX, maxY
+end
+
+local function newText()
+	local t = Instance.new("TextLabel")
+	t.BackgroundTransparency, t.TextColor3, t.TextStrokeTransparency = 1, Color3.new(1, 1, 1), 0
+	t.Font, t.TextSize, t.Size, t.AnchorPoint = Enum.Font.GothamBold, 13, UDim2.fromOffset(160, 14), Vector2.new(0.5, 1)
+	t.Parent = Esp.Gui
+	return t
+end
+
+local function espUpdate()
+	local F = State.Flags
+	local any = F["Esp Line"] or F["Esp Box"] or F["Esp Name"] or F["Esp Distance"] or F["Esp Hologram"]
+	if not any then
+		for m in pairs(Esp.Entries) do Esp.Cleanup(m) end
 		return
 	end
-	local range = math.max(State.Cfg.ScanRange, State.Cfg.ModRange) + 25
-	local pos = hrp.Position
-	local list = {}
-	for hum in pairs(self.Cand) do
-		local m, r = self:Check(hum)
-		if m then
-			local d = (r.Position - pos).Magnitude
-			if d <= range then
-				list[#list + 1] = { model = m, hum = hum, root = r, dist = d }
-			end
-		elseif not hum.Parent then
-			self.Cand[hum] = nil
-		end
-	end
-	-- Ưu tiên gần nhất, phạt nhẹ chênh lệch độ cao (khó tiếp cận hơn)
-	for _, e in ipairs(list) do
-		e.score = e.dist + math.abs(e.root.Position.Y - pos.Y) * 0.25
-	end
-	table.sort(list, function(a, b) return a.score < b.score end)
-	self.List = list
-end
-
-function Scanner:Init(maid)
-	local function add(d)
-		if d:IsA("Humanoid") then self.Cand[d] = true end
-	end
-	for _, d in ipairs(Workspace:GetDescendants()) do add(d) end
-	maid:Add(Workspace.DescendantAdded:Connect(add))
-	maid:Add(Workspace.DescendantRemoving:Connect(function(d) self.Cand[d] = nil end))
-	maid:Add(RunService.Heartbeat:Connect(function(dt)
-		self._acc += dt
-		if self._acc >= 0.1 then
-			self._acc = 0
-			self:Refresh()
-		end
-	end))
-end
-
--- ===================== MODULE: CombatEngine =====================
-local Combat = { Locked = nil, _last = 0 }
-
--- >>> ĐIỂM CẮM CƠ CHẾ TẤN CÔNG CỦA GAME <<<
-Combat.AttackHook = function(target, mode)
-	local c = LP.Character
-	local tool = c and c:FindFirstChildOfClass("Tool")
-	if tool then tool:Activate() end
-end
-
-function Combat:Attack(t, mode)
-	local now = os.clock()
-	if now - self._last < State.Cfg.AttackInterval then return end
-	self._last = now
-	local ok, err = pcall(self.AttackHook, t, mode)
-	if not ok then warn("[Panel] AttackHook:", err) end
-end
-
--- Khoá mục tiêu tạm thời: giữ mục tiêu cũ tới khi chết/biến mất/ra khỏi tầm, rồi tự chuyển
-function Combat:Pick(range)
-	local _, hrp = me()
-	if not hrp then
-		self.Locked = nil
-		return nil
-	end
-	local l = self.Locked
-	if l then
-		local m, r = Scanner:Check(l.hum)
-		if m then
-			local d = (r.Position - hrp.Position).Magnitude
-			if d <= range + 10 then -- +10 chống nhấp nháy ở mép tầm
-				l.root, l.dist = r, d
-				return l
-			end
-		end
-		self.Locked = nil
-	end
-	for _, e in ipairs(Scanner.List) do
-		if e.dist <= range and Scanner:Check(e.hum) then
-			self.Locked = e
-			return e
-		end
-	end
-	return nil
-end
-
--- Treo nhân vật: PlatformStand để Humanoid không tự cân bằng/đẩy lùi
-function Combat:Hover(on)
-	local _, _, hum = me()
-	if on then
-		if hum then
-			if not State.Snap.ps_hover then State:Save("ps_hover", hum.PlatformStand) end
-			hum.PlatformStand = true
-		end
-	else
-		local v = State:Take("ps_hover")
-		if hum and v ~= nil then hum.PlatformStand = v end
-	end
-end
-
--- Hitbox: lưu kích thước gốc để khôi phục chính xác
-local HB = { snap = {} }
-local function hbExpand(p, size, kind)
-	local s = HB.snap[p]
-	if not s then
-		s = { Size = p.Size, CanCollide = p.CanCollide, Massless = p.Massless, Transparency = p.Transparency, kind = kind }
-		HB.snap[p] = s
-	end
-	p.Size = size
-	p.CanCollide = false -- không bị tường/đất chặn
-	if kind == "root" then
-		p.Transparency = math.max(s.Transparency, 0.85)
-	else
-		p.Massless = true
-	end
-end
-local function hbRestore(p, s)
-	if p.Parent then
-		p.Size, p.CanCollide, p.Massless, p.Transparency = s.Size, s.CanCollide, s.Massless, s.Transparency
-	end
-end
-function HB:RestoreAll()
-	for p, s in pairs(self.snap) do hbRestore(p, s) end
-	table.clear(self.snap)
-end
-function HB:Step()
-	local size = Vector3.one * State.Cfg.HitboxSize
-	local c = LP.Character
-	local bp = LP:FindFirstChildOfClass("Backpack")
-	for _, holder in ipairs({ c, bp }) do
-		if holder then
-			for _, t in ipairs(holder:GetChildren()) do
-				if t:IsA("Tool") then
-					for _, p in ipairs(t:GetDescendants()) do
-						if p:IsA("BasePart") then hbExpand(p, size, "tool") end
-					end
-				end
-			end
-		end
-	end
-	local inR = {}
-	for _, e in ipairs(Scanner.List) do
-		if e.dist <= State.Cfg.ScanRange then
-			inR[e.root] = true
-			hbExpand(e.root, size, "root")
-		end
-	end
-	for p, s in pairs(self.snap) do
-		if not p.Parent then
-			self.snap[p] = nil
-		elseif s.kind == "root" and not inR[p] then
-			hbRestore(p, s)
-			self.snap[p] = nil
-		end
-	end
-end
-
--- Điều khiển mob: Im / Độn Thổ / Head Down
-local Mob = { recs = {} }
-local MODE = { AllModIm = "im", ModelDonTho = "burrow", ModelHeadDown = "head" }
-
--- CFrame cắm ngược đầu xuống đất: chôn "bury" studs phần đầu-vai, thân giữ nguyên vị trí XZ
-local function headDownCF(model, bury)
-	local pivot = model:GetPivot()
-	local bbCF, bbSize = model:GetBoundingBox()
-	local rp = RaycastParams.new()
-	rp.FilterType = Enum.RaycastFilterType.Exclude
-	rp.FilterDescendantsInstances = { model, LP.Character }
-	local from = bbCF.Position + Vector3.new(0, bbSize.Y / 2 + 2, 0)
-	local hit = Workspace:Raycast(from, Vector3.new(0, -1000, 0), rp)
-	local groundY = hit and hit.Position.Y or (bbCF.Position.Y - bbSize.Y / 2)
-	local _, yaw = pivot:ToEulerAnglesYXZ()
-	local boxCF = CFrame.new(bbCF.X, groundY - bury + bbSize.Y / 2, bbCF.Z)
-		* CFrame.Angles(0, yaw, 0) * CFrame.Angles(math.pi, 0, 0)
-	return boxCF * bbCF:ToObjectSpace(pivot)
-end
-
-function Mob:Apply(e, mode, param)
-	local m, hum = e.model, e.hum
-	local rec = {
-		mode = mode, param = param, pivot = m:GetPivot(), hum = hum,
-		ws = hum.WalkSpeed, jp = hum.JumpPower, jh = hum.JumpHeight, ar = hum.AutoRotate,
-		anch = {}, touch = {},
-	}
-	for _, p in ipairs(m:GetDescendants()) do
-		if p:IsA("BasePart") then
-			rec.anch[p], rec.touch[p] = p.Anchored, p.CanTouch
-			p.Anchored = true
-			p.CanTouch = false -- không gây sát thương qua Touched
-		end
-	end
-	if mode == "burrow" then
-		rec.target = rec.pivot - Vector3.new(0, param, 0)
-	elseif mode == "head" then
-		rec.target = headDownCF(m, param)
-	end
-	if rec.target then m:PivotTo(rec.target) end
-	self.recs[m] = rec
-	return rec
-end
-
-function Mob:Hold(e, rec)
-	local h = e.hum
-	h.WalkSpeed, h.JumpPower, h.JumpHeight, h.AutoRotate = 0, 0, 0, false
-	if e.root.Anchored == false then e.root.Anchored = true end
-	if rec.target and (e.model:GetPivot().Position - rec.target.Position).Magnitude > 1 then
-		e.model:PivotTo(rec.target) -- chống mob bị game kéo bay lên trời
-	end
-end
-
-function Mob:Restore(model)
-	local rec = self.recs[model]
-	if not rec then return end
-	self.recs[model] = nil
-	if rec.target and model.Parent then model:PivotTo(rec.pivot) end
-	for p, a in pairs(rec.anch) do
-		if p.Parent then
-			p.Anchored = a
-			p.CanTouch = rec.touch[p]
-		end
-	end
-	local h = rec.hum
-	if h and h.Parent then
-		h.WalkSpeed, h.JumpPower, h.JumpHeight, h.AutoRotate = rec.ws, rec.jp, rec.jh, rec.ar
-	end
-end
-
-function Mob:RestoreAll()
-	for model in pairs(self.recs) do self:Restore(model) end
-end
-
-function Mob:Step(mode)
-	local range = State.Cfg.ModRange
-	local param = (mode == "burrow" and State.Cfg.BurrowDepth) or (mode == "head" and State.Cfg.HeadBury) or 0
+	Camera = Workspace.CurrentCamera
+	local vp = Camera.ViewportSize
 	local seen = {}
-	for _, e in ipairs(Scanner.List) do
-		local rec = self.recs[e.model]
-		if e.dist <= range or (rec and e.dist <= range + 20) then
-			seen[e.model] = true
-			if rec and (rec.mode ~= mode or rec.param ~= param) then
-				self:Restore(e.model)
-				rec = nil
+	for _, t in ipairs(Scanner.Scan()) do
+		local m = t.Model
+		seen[m] = true
+		local e = Esp.Entries[m]
+		if not e then e = {}; Esp.Entries[m] = e end
+		local x1, y1, x2, y2 = boxCorners(m)
+		local pos, onScreen = Camera:WorldToViewportPoint(t.Root.Position)
+		local visible = x1 ~= nil and pos.Z > 0
+
+		-- Line: từ cạnh trên giữa màn hình tới mục tiêu
+		if F["Esp Line"] and visible then
+			if not e.Line then
+				local l = Instance.new("Frame")
+				l.BorderSizePixel, l.BackgroundColor3, l.AnchorPoint = 0, Color3.fromRGB(255, 80, 80), Vector2.new(0.5, 0.5)
+				l.Parent = Esp.Gui; e.Line = l
 			end
-			if not rec then rec = self:Apply(e, mode, param) end
-			self:Hold(e, rec)
-		end
-	end
-	for model in pairs(self.recs) do
-		if not seen[model] then self:Restore(model) end -- mob chết/ra tầm -> trả về như cũ
-	end
-end
+			local a, b = Vector2.new(vp.X / 2, 0), Vector2.new(pos.X, pos.Y)
+			local d = b - a
+			e.Line.Size = UDim2.fromOffset(d.Magnitude, 1)
+			e.Line.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+			e.Line.Rotation = math.deg(math.atan2(d.Y, d.X))
+		else espDestroyPart(e, "Line") end
 
-function Combat:Init()
-	-- Tele chung: đặt CFrame theo mục tiêu, triệt tiêu lực rơi/đẩy
-	local function tele(flag, place)
-		feature(flag, function(m)
-			m:Add(RunService.Heartbeat:Connect(function()
-				local _, hrp = me()
-				if not hrp then return end
-				local t = Combat:Pick(State.Cfg.ScanRange)
-				if not t then
-					Combat:Hover(false)
-					return
-				end
-				Combat:Hover(true)
-				hrp.CFrame = place(t)
-				hrp.AssemblyLinearVelocity = Vector3.zero
-				hrp.AssemblyAngularVelocity = Vector3.zero
-				Combat:Attack(t, flag)
-			end))
-			m:Add(function()
-				Combat:Hover(false)
-				Combat.Locked = nil
-			end)
-		end)
-	end
-
-	-- Tele Dron: lơ lửng trên đầu mục tiêu, nhìn thẳng xuống, bám theo khi mục tiêu di chuyển
-	tele("TeleDron", function(t)
-		local tp = t.root.Position
-		return CFrame.lookAt(tp + Vector3.new(0, State.Cfg.SafeHeight, 0), tp, Vector3.zAxis)
-	end)
-
-	-- Tele Kill: đứng sau lưng mục tiêu gần nhất, quay mặt vào mục tiêu
-	tele("TeleKill", function(t)
-		local pos = t.root.CFrame * Vector3.new(0, 0, State.Cfg.KillOffset)
-		return CFrame.lookAt(pos, t.root.Position)
-	end)
-
-	-- Aimbot: nội suy camera (Lerp) -> mượt, không giật khi đổi mục tiêu
-	feature("Aimbot", function(m)
-		RunService:BindToRenderStep("DbgAimbot", Enum.RenderPriority.Camera.Value + 1, function()
-			local c = cam()
-			if not c then return end
-			local t = Combat:Pick(State.Cfg.ScanRange)
-			if not t then return end
-			local head = t.model:FindFirstChild("Head")
-			local aim = (head and head:IsA("BasePart") and head.Position) or t.root.Position
-			local pos = c.CFrame.Position
-			if (aim - pos).Magnitude < 0.5 then return end
-			c.CFrame = c.CFrame:Lerp(CFrame.lookAt(pos, aim), State.Cfg.AimSmooth)
-		end)
-		m:Add(function() RunService:UnbindFromRenderStep("DbgAimbot") end)
-	end)
-
-	feature("HitboxAllMod", function(m)
-		local acc = 1
-		m:Add(RunService.Heartbeat:Connect(function(dt)
-			acc += dt
-			if acc >= 0.25 then
-				acc = 0
-				HB:Step()
+		-- Box: khung 2D theo bounding box 3D chiếu lên màn hình
+		if F["Esp Box"] and visible then
+			if not e.Box then
+				local b = Instance.new("Frame")
+				b.BackgroundTransparency = 1
+				local s = Instance.new("UIStroke"); s.Color, s.Thickness = Color3.fromRGB(80, 255, 120), 1.5; s.Parent = b
+				b.Parent = Esp.Gui; e.Box = b
 			end
-		end))
-		m:Add(function() HB:RestoreAll() end)
-	end)
+			e.Box.Position = UDim2.fromOffset(x1, y1)
+			e.Box.Size = UDim2.fromOffset(x2 - x1, y2 - y1)
+		else espDestroyPart(e, "Box") end
 
-	for flag, mode in pairs(MODE) do
-		feature(flag, function(m)
-			local acc = 1
-			m:Add(RunService.Heartbeat:Connect(function(dt)
-				acc += dt
-				if acc >= 0.2 then
-					acc = 0
-					Mob:Step(mode)
-				end
-			end))
-			m:Add(function() Mob:RestoreAll() end)
-		end)
-	end
-end
+		-- Name
+		if F["Esp Name"] and visible then
+			e.Name = e.Name or newText()
+			e.Name.Text = m.Name
+			e.Name.Position = UDim2.fromOffset((x1 + x2) / 2, y1 - 2)
+		else espDestroyPart(e, "Name") end
 
--- ===================== MODULE: EspEngine =====================
-local Esp = { recs = {}, itemHL = {}, hlN = 0, hlMax = 18, _acc = 0 }
+		-- Distance
+		if F["Esp Distance"] and visible then
+			e.Dist = e.Dist or newText()
+			e.Dist.AnchorPoint = Vector2.new(0.5, 0)
+			e.Dist.Text = string.format("%.0f studs (%.0f m)", t.Dist, t.Dist * 0.28)
+			e.Dist.Position = UDim2.fromOffset((x1 + x2) / 2, y2 + 2)
+		else espDestroyPart(e, "Dist") end
 
-local function mkHL(adornee, parent, color)
-	return new("Highlight", {
-		Adornee = adornee, FillColor = color, OutlineColor = color,
-		FillTransparency = 0.65, DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
-	}, parent)
-end
-
--- Tính tâm/kích thước khung 3D trong không gian root (bỏ qua HumanoidRootPart vì có thể bị phóng to)
-local function measure(model, root)
-	local inv = root.CFrame:Inverse()
-	local mn, mx
-	for _, p in ipairs(model:GetDescendants()) do
-		if p:IsA("BasePart") and p ~= root and p.Name ~= "HumanoidRootPart" then
-			local h = p.Size / 2
-			local cf = inv * p.CFrame
-			for ix = -1, 1, 2 do
-				for iy = -1, 1, 2 do
-					for iz = -1, 1, 2 do
-						local v = cf * Vector3.new(h.X * ix, h.Y * iy, h.Z * iz)
-						if mn then
-							mn = Vector3.new(math.min(mn.X, v.X), math.min(mn.Y, v.Y), math.min(mn.Z, v.Z))
-							mx = Vector3.new(math.max(mx.X, v.X), math.max(mx.Y, v.Y), math.max(mx.Z, v.Z))
-						else
-							mn, mx = v, v
-						end
-					end
-				end
+		-- Hologram: Highlight xuyên tường
+		if F["Esp Hologram"] then
+			if not e.Hl then
+				local h = Instance.new("Highlight")
+				h.DepthMode, h.FillTransparency = Enum.HighlightDepthMode.AlwaysOnTop, 0.6
+				h.FillColor, h.OutlineColor = Color3.fromRGB(0, 200, 255), Color3.new(1, 1, 1)
+				h.Adornee, h.Parent = m, m
+				e.Hl = h
 			end
-		end
+		else espDestroyPart(e, "Hl") end
 	end
-	if not mn then
-		local s = root.Size
-		mn, mx = -s / 2, s / 2
-	end
-	return (mn + mx) / 2, (mx - mn)
-end
-
-local RED = Color3.fromRGB(255, 70, 70)
-
-function Esp:Init(root)
-	self.gui = root:Add(new("ScreenGui", { Name = "DbgEsp", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 50 }, PlayerGui))
-	self.folder = root:Add(new("Folder", { Name = "DbgEspHL" }, Workspace))
-	root:Add(RunService.RenderStepped:Connect(function(dt) self:Update(dt) end))
-end
-
-function Esp:Comp(rec, key, on, make)
-	if not on then
-		if rec[key] then
-			rec[key]:Destroy()
-			rec[key] = nil
-		end
-		return nil
-	end
-	if not rec[key] then rec[key] = make() end
-	return rec[key]
-end
-
-function Esp:Kill(rec)
-	for _, k in ipairs({ "line", "box", "name", "dist" }) do
-		if rec[k] then rec[k]:Destroy() end
-	end
-	if rec.hl then
-		rec.hl:Destroy()
-		self.hlN -= 1
+	-- mục tiêu chết / ra khỏi 150 / bị hủy -> dọn chỉ báo
+	for m in pairs(Esp.Entries) do
+		if not seen[m] then Esp.Cleanup(m) end
 	end
 end
 
-function Esp:Label()
-	return new("TextLabel", {
-		BackgroundTransparency = 1, TextColor3 = Color3.new(1, 1, 1), TextStrokeTransparency = 0,
-		Font = Enum.Font.GothamBold, TextSize = 13, Size = UDim2.fromOffset(180, 14), Visible = false,
-	}, self.gui)
-end
-
-function Esp:Draw(rec, e, dist, c)
-	local S = State
-	local rp = c:WorldToViewportPoint(e.root.Position)
-	local onScreen = rp.Z > 0
-
-	-- Cập nhật kích thước khung mỗi 0.5s (không phải mỗi frame)
-	if os.clock() - rec.mt > 0.5 then
-		rec.center, rec.size = measure(e.model, e.root)
-		rec.mt = os.clock()
-	end
-
-	local needBox = S:Get("EspBox") or S:Get("EspName") or S:Get("EspDistance")
-	local x0, y0, x1, y1
-	if needBox and onScreen then
-		local mnx, mny, mxx, mxy = math.huge, math.huge, -math.huge, -math.huge
-		local ok = true
-		local cf = e.root.CFrame
-		for ix = -1, 1, 2 do
-			for iy = -1, 1, 2 do
-				for iz = -1, 1, 2 do
-					if ok then
-						local sp = c:WorldToViewportPoint(cf * (rec.center + Vector3.new(ix, iy, iz) * rec.size / 2))
-						if sp.Z <= 0 then
-							ok = false
-						else
-							mnx, mny = math.min(mnx, sp.X), math.min(mny, sp.Y)
-							mxx, mxy = math.max(mxx, sp.X), math.max(mxy, sp.Y)
-						end
-					end
-				end
-			end
-		end
-		if ok then x0, y0, x1, y1 = mnx, mny, mxx, mxy end
-	end
-
-	-- Line: từ cạnh trên giữa màn hình
-	local line = self:Comp(rec, "line", S:Get("EspLine"), function()
-		return new("Frame", { BackgroundColor3 = RED, BorderSizePixel = 0, AnchorPoint = Vector2.new(0.5, 0.5), Visible = false }, self.gui)
-	end)
-	if line then
-		if onScreen then
-			local vs = c.ViewportSize
-			local ax, ay, bx, by = vs.X / 2, 0, rp.X, rp.Y
-			local dx, dy = bx - ax, by - ay
-			line.Position = UDim2.fromOffset((ax + bx) / 2, (ay + by) / 2)
-			line.Size = UDim2.fromOffset(math.sqrt(dx * dx + dy * dy), 1.5)
-			line.Rotation = math.deg(math.atan2(dy, dx))
-			line.Visible = true
-		else
-			line.Visible = false
-		end
-	end
-
-	-- Box 2D dựng từ 8 góc bounding box 3D
-	local box = self:Comp(rec, "box", S:Get("EspBox"), function()
-		local f = new("Frame", { BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false }, self.gui)
-		new("UIStroke", { Color = RED, Thickness = 1.5 }, f)
-		return f
-	end)
-	if box then
-		if x0 then
-			box.Position = UDim2.fromOffset(x0, y0)
-			box.Size = UDim2.fromOffset(x1 - x0, y1 - y0)
-			box.Visible = true
-		else
-			box.Visible = false
-		end
-	end
-
-	local cx = x0 and (x0 + x1) / 2 or rp.X
-	local top = y0 or (rp.Y - 25)
-	local bot = y1 or (rp.Y + 25)
-
-	local name = self:Comp(rec, "name", S:Get("EspName"), function() return self:Label() end)
-	if name then
-		name.Text = e.model.Name
-		name.AnchorPoint = Vector2.new(0.5, 1)
-		name.Position = UDim2.fromOffset(cx, top - 2)
-		name.Visible = onScreen
-	end
-
-	local dl = self:Comp(rec, "dist", S:Get("EspDistance"), function() return self:Label() end)
-	if dl then
-		dl.Text = string.format("%.0f studs (%.0fm)", dist, dist * 0.28)
-		dl.TextColor3 = Color3.fromRGB(255, 230, 120)
-		dl.AnchorPoint = Vector2.new(0.5, 0)
-		dl.Position = UDim2.fromOffset(cx, bot + 2)
-		dl.Visible = onScreen
-	end
-
-	-- Hologram (Highlight tối đa ~31 cùng lúc trong Roblox -> giới hạn 18)
-	if S:Get("EspHologram") then
-		if not rec.hl and self.hlN < self.hlMax then
-			rec.hl = mkHL(e.model, self.folder, Color3.fromRGB(80, 255, 200))
-			self.hlN += 1
-		end
-	elseif rec.hl then
-		rec.hl:Destroy()
-		rec.hl = nil
-		self.hlN -= 1
-	end
-end
-
--- Esp Workspace: quét an toàn workspace.Item
-function Esp:UpdateItems()
-	local _, hrp = me()
-	local want = {}
-	local folder = Workspace:FindFirstChild("Item")
-	if State:Get("EspWorkspace") and folder and hrp then
-		local list = {}
-		for _, o in ipairs(folder:GetChildren()) do
-			if o:IsA("Model") or o:IsA("BasePart") then
-				local h = o:FindFirstChildOfClass("Humanoid")
-				if not (h and h.Health <= 0) then
-					local d = (o:GetPivot().Position - hrp.Position).Magnitude
-					if d <= State.Cfg.ScanRange then list[#list + 1] = { o = o, d = d } end
-				end
-			end
-		end
-		table.sort(list, function(a, b) return a.d < b.d end)
-		for i = 1, math.min(12, #list) do want[list[i].o] = true end
-	end
-	for o, hl in pairs(self.itemHL) do
-		if not want[o] or not o.Parent then
-			hl:Destroy()
-			self.itemHL[o] = nil
-		end
-	end
-	for o in pairs(want) do
-		if not self.itemHL[o] then
-			self.itemHL[o] = mkHL(o, self.folder, Color3.fromRGB(255, 200, 0))
-		end
-	end
-end
-
-function Esp:Update(dt)
-	local c = cam()
-	if not c then return end
-	local S = State
-	local _, hrp = me()
-	local anyDraw = S:Get("EspLine") or S:Get("EspBox") or S:Get("EspName") or S:Get("EspDistance") or S:Get("EspHologram")
-	local alive = {}
-	if hrp and anyDraw then
-		for _, e in ipairs(Scanner.List) do
-			local dist = (e.root.Position - hrp.Position).Magnitude
-			if dist <= S.Cfg.ScanRange and Scanner:Check(e.hum) then
-				alive[e.model] = true
-				local rec = self.recs[e.model]
-				if not rec then
-					rec = { mt = 0, center = Vector3.zero, size = Vector3.new(2, 5, 1) }
-					self.recs[e.model] = rec
-				end
-				self:Draw(rec, e, dist, c)
-			end
-		end
-	end
-	-- Dọn chỉ báo của mục tiêu chết/ra tầm/bị huỷ/tắt tính năng
-	for model, rec in pairs(self.recs) do
-		if not alive[model] then
-			self:Kill(rec)
-			self.recs[model] = nil
-		end
-	end
-	self._acc += dt
-	if self._acc >= 0.3 then
-		self._acc = 0
-		self:UpdateItems()
-	end
-end
-
-function Esp:Cleanup()
-	for model, rec in pairs(self.recs) do
-		self:Kill(rec)
-		self.recs[model] = nil
-	end
-	for o, hl in pairs(self.itemHL) do
-		hl:Destroy()
-		self.itemHL[o] = nil
-	end
-end
-
--- ===================== MODULE: MovementAndWorld =====================
-local Move = { keyUp = false, keyDown = false, btnUp = false, btnDown = false }
-function Move:Vert()
-	local v = 0
-	if self.keyUp or self.btnUp then v += 1 end
-	if self.keyDown or self.btnDown then v -= 1 end
-	return v
-end
-
-local NoClip = { reasons = {}, snap = {}, conn = nil }
-function NoClip:Set(reason, on)
-	self.reasons[reason] = on or nil
-	if next(self.reasons) then
-		if not self.conn then
-			self.conn = RunService.Stepped:Connect(function()
-				local c = LP.Character
-				if not c then return end
-				for _, p in ipairs(c:GetDescendants()) do
-					if p:IsA("BasePart") then
-						if self.snap[p] == nil then self.snap[p] = p.CanCollide end
-						if p.CanCollide then p.CanCollide = false end
-					end
-				end
+local function registerEsp(name)
+	State.Register(name, function()
+		local j = State.Janitor(name)
+		if not Esp.Gui or not Esp.Gui.Parent then Esp.Gui = makeGui() end
+		if not Esp._conn then
+			Esp._conn = RunService.RenderStepped:Connect(function()
+				local ok, err = pcall(espUpdate)
+				if not ok then warn("[Esp] " .. tostring(err)) end
 			end)
 		end
-	elseif self.conn then
-		self.conn:Disconnect()
-		self.conn = nil
-		for p, v in pairs(self.snap) do
-			if p.Parent then p.CanCollide = v end -- khôi phục đúng trạng thái ban đầu
-		end
-		table.clear(self.snap)
-	end
+		j:Add(function()
+			task.defer(function()
+				local F = State.Flags
+				if not (F["Esp Line"] or F["Esp Box"] or F["Esp Name"] or F["Esp Distance"] or F["Esp Hologram"]) then
+					if Esp._conn then Esp._conn:Disconnect(); Esp._conn = nil end
+					for m in pairs(Esp.Entries) do Esp.Cleanup(m) end
+				end
+			end)
+		end)
+	end, function() end)
 end
+for _, n in ipairs({ "Esp Line", "Esp Box", "Esp Name", "Esp Distance", "Esp Hologram" }) do registerEsp(n) end
 
-local function groundY(hrp)
+---------------------------------------------------------------------
+-- 5) MovementAndWorld
+---------------------------------------------------------------------
+local Input = { up = false, down = false } -- nút ▲▼ trên màn hình / phím
+
+local function groundY(x, z, refY, ignore)
 	local rp = RaycastParams.new()
 	rp.FilterType = Enum.RaycastFilterType.Exclude
-	rp.FilterDescendantsInstances = { LP.Character }
-	local r = Workspace:Raycast(hrp.Position, Vector3.new(0, -1000, 0), rp)
-	return r and r.Position.Y
+	rp.FilterDescendantsInstances = { ignore }
+	local r = Workspace:Raycast(Vector3.new(x, refY + 3, z), Vector3.new(0, -500, 0), rp)
+	return r and r.Position.Y or refY
 end
 
--- Lõi bay: BodyVelocity luôn về 0 khi không bấm -> không tự rơi/tăng/giảm
--- air = bay tự do | dron = úp mặt, giữ độ cao cách đất | down = ngửa mặt, hạ xuống dưới đất
-local function flight(flag, mode)
-	feature(flag, function(m)
-		local _, hrp, hum = me()
-		if not hrp or not hum then error("Chưa có nhân vật") end
-
-		local bv = new("BodyVelocity", { MaxForce = Vector3.one * 1e9, Velocity = Vector3.zero }, hrp)
-		local bg = new("BodyGyro", { MaxTorque = Vector3.one * 1e9, P = 20000, D = 1000, CFrame = hrp.CFrame }, hrp)
-		m:Add(bv)
-		m:Add(bg)
-
-		State:Save("fly_ps", hum.PlatformStand)
-		hum.PlatformStand = true
-		m:Add(function()
-			local _, _, h = me()
-			local v = State:Take("fly_ps")
-			if h and v ~= nil then h.PlatformStand = v end
-		end)
-
-		local holdY = hrp.Position.Y
-		if mode == "down" then
-			NoClip:Set("FlyDown", true)
-			m:Add(function() NoClip:Set("FlyDown", false) end)
-			holdY = (groundY(hrp) or holdY) - State.Cfg.DownDepth
+-- No Clip: tắt va chạm, khôi phục chính xác trạng thái ban đầu
+State.Register("No Clip", function()
+	local j = State.Janitor("No Clip")
+	local snap = {}
+	State.Snap["No Clip"] = snap
+	j:Add(RunService.Stepped:Connect(function()
+		local ch = LP.Character
+		if not ch then return end
+		for _, p in ipairs(ch:GetDescendants()) do
+			if p:IsA("BasePart") then
+				if snap[p] == nil then snap[p] = p.CanCollide end
+				p.CanCollide = false
+			end
 		end
-		-- úp mặt = -90 độ quanh X, ngửa mặt = +90 độ; yaw lấy từ camera nên camera giữ nguyên
-		local tilt = (mode == "dron" and -math.pi / 2) or (mode == "down" and math.pi / 2) or 0
+	end))
+	j:Add(function()
+		for p, v in pairs(snap) do if p.Parent then p.CanCollide = v end end
+		table.clear(snap)
+	end)
+end, function() end)
 
-		m:Add(RunService.Heartbeat:Connect(function(dt)
-			local _, r, h = me()
-			local c = cam()
-			if not r or not h or not c or h.Health <= 0 then return end
-			local look = c.CFrame.LookVector
-			bg.CFrame = CFrame.Angles(0, math.atan2(-look.X, -look.Z), 0) * CFrame.Angles(tilt, 0, 0)
-
-			local sp = State.Cfg.FlySpeed
-			local inp = Move:Vert()
-			local dir = h.MoveDirection
+-- Lõi bay dùng chung cho Fly Air / Fly Dron / Fly Down
+local flyModes = { "Fly Air", "Fly Dron", "Fly Down" }
+local function registerFly(name, mode)
+	State.Register(name, function()
+		for _, other in ipairs(flyModes) do if other ~= name then State.Set(other, false) end end
+		local j = State.Janitor(name)
+		local ch, hum, root = getChar()
+		assert(ch, "chưa có nhân vật")
+		local snap = { PlatformStand = hum.PlatformStand, AutoRotate = hum.AutoRotate }
+		State.Snap[name] = snap
+		local gY = groundY(root.Position.X, root.Position.Z, root.Position.Y, ch)
+		local turnedNoclip = false
+		if mode == "Down" and not State.Flags["No Clip"] then
+			State.Set("No Clip", true); turnedNoclip = true
+		end
+		hum.PlatformStand, hum.AutoRotate = true, false
+		local bv = j:Add(Instance.new("BodyVelocity"))
+		bv.MaxForce, bv.Velocity, bv.Parent = Vector3.one * 1e7, Vector3.zero, root
+		local bg = j:Add(Instance.new("BodyGyro"))
+		bg.MaxTorque, bg.P, bg.D, bg.Parent = Vector3.one * 1e7, 2e4, 1e3, root
+		local holdY = root.Position.Y -- chống tự lên/xuống khi không bấm
+		j:Add(RunService.Heartbeat:Connect(function(dt)
+			local c, h, r = getChar()
+			if not c then return end
+			local cam = Workspace.CurrentCamera
+			local look = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z)
+			if look.Magnitude < 0.01 then look = Vector3.new(0, 0, -1) end
+			local base = CFrame.lookAt(r.Position, r.Position + look)
+			local move = h.MoveDirection * State.Config.FlySpeed
+			local v = (Input.up and 1 or 0) - (Input.down and 1 or 0)
 			local vy = 0
-			if mode == "air" then
-				vy = inp * sp
-			elseif mode == "dron" then
-				if inp ~= 0 then State:SetCfg("DroneHeight", State.Cfg.DroneHeight + inp * 6 * dt) end
-				local g = groundY(r)
-				local ty
-				if g then
-					ty = g + State.Cfg.DroneHeight
-					holdY = ty
-				else
-					holdY += inp * 6 * dt
-					ty = holdY
-				end
-				vy = clamp((ty - r.Position.Y) * 5, -sp, sp) -- bay lên/xuống từ từ
-			else -- down
-				holdY += inp * math.min(sp, 40) * dt
-				vy = clamp((holdY - r.Position.Y) * 5, -sp, sp)
+			if mode == "Air" then
+				vy = v * State.Config.FlySpeed
+				bg.CFrame = base
+			elseif mode == "Dron" then
+				if v ~= 0 then State.Config.DroneHeight = clamp(State.Config.DroneHeight + v * dt * 6, 1, 200) end
+				gY = groundY(r.Position.X, r.Position.Z, r.Position.Y, c)
+				vy = clamp((gY + State.Config.DroneHeight - r.Position.Y) * 6, -40, 40)
+				bg.CFrame = base * CFrame.Angles(-math.pi / 2, 0, 0) -- úp mặt xuống
+			else -- Down
+				if v ~= 0 then State.Config.DownDepth = clamp(State.Config.DownDepth - v * dt * 6, 1, 300) end
+				gY = groundY(r.Position.X, r.Position.Z, gY + 1, c)
+				vy = clamp((gY - State.Config.DownDepth - r.Position.Y) * 6, -40, 40)
+				bg.CFrame = base * CFrame.Angles(math.pi / 2, 0, 0) -- nằm ngửa
 			end
-			bv.Velocity = Vector3.new(dir.X * sp, vy, dir.Z * sp)
+			bv.Velocity = Vector3.new(move.X, vy, move.Z)
 		end))
-	end)
+		j:Add(function()
+			local _, h2 = getChar()
+			if h2 then h2.PlatformStand, h2.AutoRotate = snap.PlatformStand, snap.AutoRotate end
+			local c2, _, r2 = getChar()
+			if r2 then -- đứng thẳng lại, ra khỏi lòng đất nếu cần
+				local p = r2.Position
+				if mode == "Down" then p = Vector3.new(p.X, gY + 4, p.Z) end
+				r2.CFrame = CFrame.new(p) * CFrame.Angles(0, select(2, r2.CFrame:ToEulerAnglesYXZ()), 0)
+				zeroVel(r2)
+			end
+			if turnedNoclip then State.Set("No Clip", false) end
+		end)
+	end, function() end)
 end
+registerFly("Fly Air", "Air"); registerFly("Fly Dron", "Dron"); registerFly("Fly Down", "Down")
 
-local NV_PROPS = { "Brightness", "ClockTime", "FogStart", "FogEnd", "Ambient", "OutdoorAmbient", "GlobalShadows", "ExposureCompensation" }
-
-local World = {}
-function World:Init(root)
-	-- Phím E / Q cho bay lên / xuống (trên mobile dùng nút ▲ ▼)
-	root:Add(UIS.InputBegan:Connect(function(i, gp)
-		if gp then return end
-		if i.KeyCode == Enum.KeyCode.E then Move.keyUp = true end
-		if i.KeyCode == Enum.KeyCode.Q then Move.keyDown = true end
+-- Speed: WalkSpeed thời gian thực, khôi phục khi tắt
+State.Register("Speed", function()
+	local j = State.Janitor("Speed")
+	local _, hum = getChar()
+	local orig = hum and hum.WalkSpeed or 16
+	State.Snap["Speed"] = { WalkSpeed = orig }
+	j:Add(RunService.Heartbeat:Connect(function()
+		local _, h = getChar()
+		if h then h.WalkSpeed = State.Config.WalkSpeed end
 	end))
-	root:Add(UIS.InputEnded:Connect(function(i)
-		if i.KeyCode == Enum.KeyCode.E then Move.keyUp = false end
-		if i.KeyCode == Enum.KeyCode.Q then Move.keyDown = false end
-	end))
+	j:Add(function() local _, h = getChar(); if h then h.WalkSpeed = orig end end)
+end, function() end)
 
-	flight("FlyAir", "air")
-	flight("FlyDron", "dron")
-	flight("FlyDown", "down")
-
-	feature("NoClip", function(m)
-		NoClip:Set("User", true)
-		m:Add(function() NoClip:Set("User", false) end)
-	end)
-
-	feature("Speed", function(m)
-		local _, _, hum = me()
-		if hum then State:Save("WalkSpeed", hum.WalkSpeed) end
-		m:Add(RunService.Heartbeat:Connect(function()
-			local _, _, h = me()
-			if h and h.WalkSpeed ~= State.Cfg.WalkSpeed then h.WalkSpeed = State.Cfg.WalkSpeed end
-		end))
-		m:Add(function()
-			local _, _, h = me()
-			local v = State:Take("WalkSpeed")
-			if h and v ~= nil then h.WalkSpeed = v end
-		end)
-	end)
-
-	feature("JumpingAir", function(m)
-		local last = 0
-		m:Add(UIS.JumpRequest:Connect(function()
-			local _, r, h = me()
-			if not h or not r or h.Health <= 0 then return end
-			if os.clock() - last < 0.12 then return end
-			last = os.clock()
-			local st = h:GetState()
-			if st == Enum.HumanoidStateType.Freefall or st == Enum.HumanoidStateType.Jumping then
-				local power = h.UseJumpPower and h.JumpPower or math.sqrt(2 * Workspace.Gravity * h.JumpHeight)
-				h:ChangeState(Enum.HumanoidStateType.Jumping)
-				local v = r.AssemblyLinearVelocity
-				r.AssemblyLinearVelocity = Vector3.new(v.X, math.max(power, 30), v.Z) -- giữ nguyên X/Z -> vẫn di chuyển được
-			end
-		end))
-	end)
-
-	feature("NightVision", function(m)
-		local orig, atm = {}, {}
-		for _, k in ipairs(NV_PROPS) do orig[k] = Lighting[k] end
-		local function apply()
-			Lighting.Brightness = 2
-			Lighting.ClockTime = 14
-			Lighting.FogStart = 1e5
-			Lighting.FogEnd = 1e6
-			Lighting.Ambient = Color3.fromRGB(200, 200, 200)
-			Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
-			Lighting.GlobalShadows = false
-			Lighting.ExposureCompensation = 0.5
-			for _, a in ipairs(Lighting:GetChildren()) do
-				if a:IsA("Atmosphere") then
-					if not atm[a] then atm[a] = { a.Density, a.Haze } end
-					a.Density, a.Haze = 0, 0
-				end
-			end
-		end
-		apply()
-		local acc = 0
-		m:Add(RunService.Heartbeat:Connect(function(dt) -- game tự reset thì áp lại
-			acc += dt
-			if acc >= 0.5 then
-				acc = 0
-				apply()
-			end
-		end))
-		m:Add(function()
-			for k, v in pairs(orig) do Lighting[k] = v end
-			for a, v in pairs(atm) do
-				if a.Parent then a.Density, a.Haze = v[1], v[2] end
-			end
-		end)
-	end)
-
-	feature("FixLag", function(m)
-		local log, alive = {}, true
-		local function trim(o)
-			if o:IsA("ParticleEmitter") or o:IsA("Trail") or o:IsA("Beam") or o:IsA("Smoke")
-				or o:IsA("Fire") or o:IsA("Sparkles") or o:IsA("PostEffect") then
-				if o.Enabled then
-					log[#log + 1] = { o, "Enabled", true }
-					o.Enabled = false
-				end
-			elseif o:IsA("BasePart") and o.CastShadow then
-				log[#log + 1] = { o, "CastShadow", true }
-				o.CastShadow = false
-			end
-		end
-		local q
-		pcall(function()
-			q = settings().Rendering.QualityLevel
-			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-		end)
-		task.spawn(function() -- quét theo lô, yield để không đứng hình
-			local n = 0
-			for _, r in ipairs({ Workspace, Lighting }) do
-				for _, o in ipairs(r:GetDescendants()) do
-					if not alive then return end
-					trim(o)
-					n += 1
-					if n % 500 == 0 then task.wait() end
-				end
-			end
-		end)
-		m:Add(Workspace.DescendantAdded:Connect(trim))
-		m:Add(Lighting.DescendantAdded:Connect(trim))
-		m:Add(function()
-			alive = false
-			for _, r in ipairs(log) do
-				if r[1].Parent then pcall(function() r[1][r[2]] = r[3] end) end
-			end
-			if q then pcall(function() settings().Rendering.QualityLevel = q end) end
-		end)
-	end)
-
-	-- Hồi sinh: bật lại các tính năng gắn với nhân vật
-	local CHAR_FLAGS = { "Speed", "FlyAir", "FlyDron", "FlyDown", "NoClip", "TeleDron", "TeleKill", "JumpingAir" }
-	root:Add(LP.CharacterAdded:Connect(function(char)
-		NoClip.snap = {}
-		State.Snap.fly_ps, State.Snap.ps_hover = nil, nil
-		char:WaitForChild("HumanoidRootPart", 10)
-		char:WaitForChild("Humanoid", 10)
-		task.wait(0.3)
-		for _, f in ipairs(CHAR_FLAGS) do
-			if State:Get(f) then
-				State:Set(f, false)
-				State:Set(f, true)
-			end
+-- Jumping Air: nhảy trên không, không đổi PlatformStand nên vẫn di chuyển bình thường
+State.Register("Jumping Air", function()
+	local j = State.Janitor("Jumping Air")
+	j:Add(UIS.JumpRequest:Connect(function()
+		local _, h = getChar()
+		if h and h:GetState() ~= Enum.HumanoidStateType.Jumping then
+			h:ChangeState(Enum.HumanoidStateType.Jumping)
 		end
 	end))
-end
+end, function() end)
 
--- ===================== MODULE: UIController =====================
-local UI = {}
-local C = {
-	bg = Color3.fromRGB(28, 28, 34), bar = Color3.fromRGB(40, 40, 50), row = Color3.fromRGB(38, 38, 46),
-	on = Color3.fromRGB(46, 160, 80), off = Color3.fromRGB(150, 50, 50), tab = Color3.fromRGB(55, 55, 70),
-	tabOn = Color3.fromRGB(80, 110, 220), text = Color3.fromRGB(235, 235, 240),
-}
-
-local function fmt(v) return string.format("%g", math.floor(v * 10 + 0.5) / 10) end
-
-local PAGES = {
-	{ "Main", {
-		{ "t", "Tele Dron", "TeleDron" },
-		{ "n", "Tele Dron - Khoảng cách an toàn", "SafeHeight" },
-		{ "t", "Hitbox All Mod", "HitboxAllMod" },
-		{ "n", "Hitbox - Phạm vi", "HitboxSize" },
-		{ "t", "Tele Kill", "TeleKill" },
-		{ "n", "Tele Kill - Khoảng cách sau lưng", "KillOffset" },
-		{ "t", "Aimbot", "Aimbot" },
-		{ "t", "All Mod Im", "AllModIm" },
-		{ "t", "Model Độn Thổ", "ModelDonTho" },
-		{ "n", "Độ sâu độn thổ", "BurrowDepth" },
-		{ "t", "Model head down", "ModelHeadDown" },
-		{ "n", "Độ chôn đầu-vai", "HeadBury" },
-		{ "n", "Phạm vi mod (Im/Độn Thổ/Head)", "ModRange" },
-		{ "n", "Phạm vi quét (Scan Range)", "ScanRange" },
-	} },
-	{ "Esp", {
-		{ "t", "Esp Line", "EspLine" },
-		{ "t", "Esp Box", "EspBox" },
-		{ "t", "Esp Name", "EspName" },
-		{ "t", "Esp Distance", "EspDistance" },
-		{ "t", "Esp Hologram", "EspHologram" },
-		{ "t", "Esp Workspace", "EspWorkspace" },
-	} },
-	{ "Khác", {
-		{ "t", "Fly Down", "FlyDown" },
-		{ "n", "Fly Down - Độ sâu", "DownDepth" },
-		{ "t", "Fly Dron", "FlyDron" },
-		{ "n", "Fly Dron - Độ cao", "DroneHeight" },
-		{ "t", "No Clip", "NoClip" },
-		{ "t", "Fly Air", "FlyAir" },
-		{ "n", "Fly Speed", "FlySpeed" },
-		{ "t", "Speed", "Speed" },
-		{ "n", "Speed - WalkSpeed", "WalkSpeed" },
-		{ "t", "Jumping Air", "JumpingAir" },
-		{ "t", "Night Vision", "NightVision" },
-		{ "t", "Fix Lag", "FixLag" },
-	} },
-}
-
-function UI:Build(root, onClose)
-	local gui = root:Add(new("ScreenGui", { Name = "DbgPanel", ResetOnSpawn = false, DisplayOrder = 100, IgnoreGuiInset = true }, PlayerGui))
-	local main = new("Frame", { Size = UDim2.fromOffset(300, 400), Position = UDim2.fromOffset(16, 60), BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true }, gui)
-	new("UICorner", { CornerRadius = UDim.new(0, 8) }, main)
-
-	local bar = new("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.bar, BorderSizePixel = 0 }, main)
-	new("UICorner", { CornerRadius = UDim.new(0, 8) }, bar)
-	new("TextLabel", { Text = "DEBUG PANEL", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = C.text, BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -80, 1, 0), TextXAlignment = Enum.TextXAlignment.Left }, bar)
-
-	local function barBtn(txt, x)
-		return new("TextButton", { Text = txt, Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = C.text, BackgroundColor3 = C.tab, Size = UDim2.fromOffset(26, 22), Position = UDim2.new(1, x, 0, 5), AutoButtonColor = true }, bar)
+-- Night Vision: lưu cấu hình ánh sáng gốc và trả lại khi tắt
+State.Register("Night Vision", function()
+	local j = State.Janitor("Night Vision")
+	local snap = {
+		Brightness = Lighting.Brightness, ClockTime = Lighting.ClockTime, FogEnd = Lighting.FogEnd,
+		FogStart = Lighting.FogStart, Ambient = Lighting.Ambient, OutdoorAmbient = Lighting.OutdoorAmbient,
+		GlobalShadows = Lighting.GlobalShadows, Atm = {},
+	}
+	for _, a in ipairs(Lighting:GetChildren()) do
+		if a:IsA("Atmosphere") then snap.Atm[a] = { a.Density, a.Haze } end
 	end
-	local btnCollapse, btnClose = barBtn("–", -62), barBtn("×", -32)
-	new("UICorner", { CornerRadius = UDim.new(0, 5) }, btnCollapse)
-	new("UICorner", { CornerRadius = UDim.new(0, 5) }, btnClose)
+	State.Snap["Night Vision"] = snap
+	j:Add(RunService.RenderStepped:Connect(function()
+		Lighting.Brightness, Lighting.ClockTime = 2, 14
+		Lighting.FogStart, Lighting.FogEnd = 1e5, 1e6
+		Lighting.Ambient, Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200), Color3.fromRGB(200, 200, 200)
+		Lighting.GlobalShadows = false
+		for a in pairs(snap.Atm) do if a.Parent then a.Density, a.Haze = 0, 0 end end
+	end))
+	j:Add(function()
+		for k, v in pairs(snap) do
+			if k ~= "Atm" then pcall(function() Lighting[k] = v end) end
+		end
+		for a, v in pairs(snap.Atm) do if a.Parent then a.Density, a.Haze = v[1], v[2] end end
+	end)
+end, function() end)
 
-	local body = new("Frame", { Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 1, -32), BackgroundTransparency = 1 }, main)
-	local tabBar = new("Frame", { Size = UDim2.new(1, -12, 0, 28), Position = UDim2.fromOffset(6, 4), BackgroundTransparency = 1 }, body)
-	new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6) }, tabBar)
+-- Fix Lag: tắt hiệu ứng nặng (lưu trạng thái để bật lại được)
+local HEAVY = { ParticleEmitter = 1, Trail = 1, Beam = 1, Fire = 1, Smoke = 1, Sparkles = 1,
+	BloomEffect = 1, BlurEffect = 1, SunRaysEffect = 1, DepthOfFieldEffect = 1, ColorCorrectionEffect = 1 }
+State.Register("Fix Lag", function()
+	local j = State.Janitor("Fix Lag")
+	local snap = { Shadows = Lighting.GlobalShadows, Items = {} }
+	State.Snap["Fix Lag"] = snap
+	Lighting.GlobalShadows = false
+	local function handle(d)
+		if HEAVY[d.ClassName] and snap.Items[d] == nil then
+			snap.Items[d] = d.Enabled
+			d.Enabled = false
+		elseif d:IsA("BasePart") and d.CastShadow then
+			snap.Items[d] = "shadow"; d.CastShadow = false
+		end
+	end
+	task.spawn(function()
+		local n = 0
+		for _, d in ipairs(Workspace:GetDescendants()) do
+			if not State.Flags["Fix Lag"] then return end
+			handle(d); n += 1
+			if n % 500 == 0 then task.wait() end -- yield tránh treo
+		end
+		for _, d in ipairs(Lighting:GetChildren()) do handle(d) end
+	end)
+	j:Add(Workspace.DescendantAdded:Connect(handle))
+	j:Add(function()
+		Lighting.GlobalShadows = snap.Shadows
+		for d, v in pairs(snap.Items) do
+			if d.Parent then
+				if v == "shadow" then d.CastShadow = true else d.Enabled = v end
+			end
+		end
+		table.clear(snap.Items)
+	end)
+end, function() end)
 
-	-- Kéo thả cả bảng (chuột + cảm ứng)
+-- Nhân vật hồi sinh: tắt các tính năng gắn với nhân vật cũ để tránh trạng thái lỗi
+LP.CharacterAdded:Connect(function()
+	for _, n in ipairs({ "Fly Air", "Fly Dron", "Fly Down", "Tele Dron", "No Clip", "Speed", "Player Barrier" }) do
+		State.Set(n, false)
+	end
+end)
+
+---------------------------------------------------------------------
+-- 6) UIController
+---------------------------------------------------------------------
+local UI = {}
+
+local function corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 6); c.Parent = p end
+
+function UI.Build()
+	local old = LP:WaitForChild("PlayerGui"):FindFirstChild("DebugPanel")
+	if old then old:Destroy() end
+	local gui = Instance.new("ScreenGui")
+	gui.Name, gui.ResetOnSpawn, gui.DisplayOrder = "DebugPanel", false, 10
+	gui.Parent = LP.PlayerGui
+
+	local main = Instance.new("Frame")
+	main.Size, main.Position = UDim2.fromOffset(280, 380), UDim2.new(0, 20, 0.5, -190)
+	main.BackgroundColor3, main.BorderSizePixel = Color3.fromRGB(25, 25, 32), 0
+	main.Parent = gui; corner(main, 8)
+
+	local title = Instance.new("TextLabel")
+	title.Size, title.BackgroundColor3 = UDim2.new(1, 0, 0, 30), Color3.fromRGB(40, 40, 55)
+	title.Text, title.TextColor3, title.Font, title.TextSize = "  Debug Panel", Color3.new(1, 1, 1), Enum.Font.GothamBold, 14
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = main; corner(title, 8)
+
+	-- Kéo thả menu
 	local dragging, dragStart, startPos
-	root:Add(bar.InputBegan:Connect(function(i)
+	title.InputBegan:Connect(function(i)
 		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
 			dragging, dragStart, startPos = true, i.Position, main.Position
-			i.Changed:Connect(function()
-				if i.UserInputState == Enum.UserInputState.End then dragging = false end
-			end)
 		end
-	end))
-	root:Add(UIS.InputChanged:Connect(function(i)
+	end)
+	UIS.InputChanged:Connect(function(i)
 		if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
 			local d = i.Position - dragStart
 			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
 		end
-	end))
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+	end)
+
+	local body = Instance.new("Frame")
+	body.Size, body.Position, body.BackgroundTransparency = UDim2.new(1, 0, 1, -30), UDim2.fromOffset(0, 30), 1
+	body.Parent = main
 
 	-- Thu gọn / mở rộng
+	local collapse = Instance.new("TextButton")
+	collapse.Size, collapse.Position = UDim2.fromOffset(26, 22), UDim2.new(1, -30, 0, 4)
+	collapse.Text, collapse.BackgroundColor3, collapse.TextColor3 = "–", Color3.fromRGB(70, 70, 90), Color3.new(1, 1, 1)
+	collapse.Parent = title; corner(collapse, 4)
 	local collapsed = false
-	root:Add(btnCollapse.MouseButton1Click:Connect(function()
+	collapse.MouseButton1Click:Connect(function()
 		collapsed = not collapsed
 		body.Visible = not collapsed
-		main.Size = collapsed and UDim2.fromOffset(300, 32) or UDim2.fromOffset(300, 400)
-		btnCollapse.Text = collapsed and "+" or "–"
-	end))
-	root:Add(btnClose.MouseButton1Click:Connect(onClose))
+		main.Size = collapsed and UDim2.fromOffset(280, 30) or UDim2.fromOffset(280, 380)
+		collapse.Text = collapsed and "+" or "–"
+	end)
 
-	-- Tab + trang cuộn
-	local pages, tabs = {}, {}
-	local function showTab(name)
-		for n, p in pairs(pages) do
-			p.Visible = (n == name)
-			tabs[n].BackgroundColor3 = (n == name) and C.tabOn or C.tab
-		end
+	-- Thanh tab
+	local tabBar = Instance.new("Frame")
+	tabBar.Size, tabBar.BackgroundTransparency = UDim2.new(1, -10, 0, 28), 1
+	tabBar.Position = UDim2.fromOffset(5, 4)
+	tabBar.Parent = body
+	local tl = Instance.new("UIListLayout"); tl.FillDirection, tl.Padding = Enum.FillDirection.Horizontal, UDim.new(0, 4); tl.Parent = tabBar
+
+	local pages, tabBtns = {}, {}
+	local function switchTab(n)
+		for name, pg in pairs(pages) do pg.Visible = (name == n) end
+		for name, b in pairs(tabBtns) do b.BackgroundColor3 = (name == n) and Color3.fromRGB(80, 110, 220) or Color3.fromRGB(50, 50, 65) end
+	end
+	local function makePage(name)
+		local b = Instance.new("TextButton")
+		b.Size, b.Text, b.TextColor3 = UDim2.new(1 / 3, -3, 1, 0), name, Color3.new(1, 1, 1)
+		b.Font, b.TextSize = Enum.Font.GothamBold, 13
+		b.Parent = tabBar; corner(b, 5)
+		b.MouseButton1Click:Connect(function() switchTab(name) end)
+		tabBtns[name] = b
+		local sf = Instance.new("ScrollingFrame")
+		sf.Size, sf.Position = UDim2.new(1, -10, 1, -42), UDim2.fromOffset(5, 38)
+		sf.BackgroundTransparency, sf.BorderSizePixel = 1, 0
+		sf.ScrollBarThickness, sf.CanvasSize, sf.AutomaticCanvasSize = 4, UDim2.new(), Enum.AutomaticSize.Y
+		sf.Parent = body
+		local l = Instance.new("UIListLayout"); l.Padding, l.SortOrder = UDim.new(0, 4), Enum.SortOrder.LayoutOrder; l.Parent = sf
+		pages[name] = sf
+		return sf
 	end
 
-	for _, def in ipairs(PAGES) do
-		local name, rows = def[1], def[2]
-		local tb = new("TextButton", { Text = name, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text, BackgroundColor3 = C.tab, Size = UDim2.new(1 / 3, -4, 1, 0) }, tabBar)
-		new("UICorner", { CornerRadius = UDim.new(0, 6) }, tb)
-		tabs[name] = tb
-
-		local page = new("ScrollingFrame", {
-			Position = UDim2.fromOffset(6, 38), Size = UDim2.new(1, -12, 1, -44), BackgroundTransparency = 1, BorderSizePixel = 0,
-			ScrollBarThickness = 4, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false,
-		}, body)
-		new("UIListLayout", { Padding = UDim.new(0, 4) }, page)
-		pages[name] = page
-		root:Add(tb.MouseButton1Click:Connect(function() showTab(name) end))
-
-		for _, r in ipairs(rows) do
-			local kind, label, key = r[1], r[2], r[3]
-			local row = new("Frame", { Size = UDim2.new(1, -8, 0, 30), BackgroundColor3 = C.row, BorderSizePixel = 0 }, page)
-			new("UICorner", { CornerRadius = UDim.new(0, 6) }, row)
-			new("TextLabel", { Text = label, Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = C.text, BackgroundTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left, Position = UDim2.fromOffset(8, 0), Size = UDim2.new(1, -76, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd }, row)
-
-			if kind == "t" then
-				local b = new("TextButton", { Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.text, Size = UDim2.fromOffset(56, 22), Position = UDim2.new(1, -62, 0, 4) }, row)
-				new("UICorner", { CornerRadius = UDim.new(0, 5) }, b)
-				local function refresh()
-					local on = State:Get(key)
-					b.Text = on and "ON" or "OFF"
-					b.BackgroundColor3 = on and C.on or C.off
+	local toggleBtns = {}
+	-- Hàng chức năng: nút ON/OFF + ▲▼ để kéo lên/xuống thứ tự tự do
+	local function addToggle(page, feature)
+		local row = Instance.new("Frame")
+		row.Size, row.BackgroundTransparency = UDim2.new(1, -6, 0, 28), 1
+		row.LayoutOrder = #page:GetChildren()
+		row.Parent = page
+		local b = Instance.new("TextButton")
+		b.Size, b.Font, b.TextSize, b.TextColor3 = UDim2.new(1, -52, 1, 0), Enum.Font.Gotham, 13, Color3.new(1, 1, 1)
+		b.Parent = row; corner(b, 5)
+		toggleBtns[feature] = b
+		local function refresh()
+			local on = State.Flags[feature]
+			b.Text = feature .. ": " .. (on and "ON" or "OFF")
+			b.BackgroundColor3 = on and Color3.fromRGB(40, 150, 80) or Color3.fromRGB(60, 60, 75)
+		end
+		refresh()
+		b.MouseButton1Click:Connect(function() State.Toggle(feature) end)
+		local function mv(dir)
+			for _, other in ipairs(page:GetChildren()) do
+				if other:IsA("Frame") and other.LayoutOrder == row.LayoutOrder + dir then
+					other.LayoutOrder, row.LayoutOrder = row.LayoutOrder, row.LayoutOrder + dir
+					return
 				end
-				refresh()
-				State:Bind("*", function(f) if f == key then refresh() end end)
-				root:Add(b.MouseButton1Click:Connect(function() State:Set(key, not State:Get(key)) end))
-			else
-				local box = new("TextBox", { Text = fmt(State.Cfg[key]), Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.text, BackgroundColor3 = C.tab, ClearTextOnFocus = false, Size = UDim2.fromOffset(56, 22), Position = UDim2.new(1, -62, 0, 4) }, row)
-				new("UICorner", { CornerRadius = UDim.new(0, 5) }, box)
-				root:Add(box.FocusLost:Connect(function()
-					State:SetCfg(key, tonumber(box.Text))
-					box.Text = fmt(State.Cfg[key]) -- số không hợp lệ -> trả lại giá trị cũ
-				end))
-				State:Bind("cfg", function(k) if k == key then box.Text = fmt(State.Cfg[key]) end end)
 			end
 		end
+		for i, sym in ipairs({ "▲", "▼" }) do
+			local m = Instance.new("TextButton")
+			m.Size, m.Position, m.Text = UDim2.fromOffset(22, 28), UDim2.new(1, -48 + (i - 1) * 24, 0, 0), sym
+			m.BackgroundColor3, m.TextColor3 = Color3.fromRGB(50, 50, 65), Color3.new(1, 1, 1)
+			m.Parent = row; corner(m, 5)
+			m.MouseButton1Click:Connect(function() mv(i == 1 and -1 or 1) end)
+		end
+		table.insert(State.OnChanged, function(n) if n == feature then refresh() end end)
 	end
-	showTab("Main")
 
-	-- Cụm nút tăng/giảm độ cao (hiện khi bật bất kỳ chế độ bay nào); giữ nút để di chuyển
-	local fly = new("Frame", { Size = UDim2.fromOffset(60, 124), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -20, 0.5, 0), BackgroundTransparency = 1, Visible = false }, gui)
-	local function flyBtn(txt, y, flagName)
-		local b = new("TextButton", { Text = txt, Font = Enum.Font.GothamBold, TextSize = 24, TextColor3 = C.text, BackgroundColor3 = C.bar, BackgroundTransparency = 0.2, Size = UDim2.fromOffset(60, 58), Position = UDim2.fromOffset(0, y) }, fly)
-		new("UICorner", { CornerRadius = UDim.new(0, 10) }, b)
-		root:Add(b.InputBegan:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then Move[flagName] = true end
-		end))
-		root:Add(b.InputEnded:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then Move[flagName] = false end
-		end))
+	-- Ô nhập số có kiểm tra hợp lệ
+	local function addNumber(page, label, key, lo, hi)
+		local row = Instance.new("Frame")
+		row.Size, row.BackgroundTransparency, row.LayoutOrder = UDim2.new(1, -6, 0, 26), 1, #page:GetChildren()
+		row.Parent = page
+		local t = Instance.new("TextLabel")
+		t.Size, t.BackgroundTransparency, t.Text = UDim2.new(1, -80, 1, 0), 1, label
+		t.TextColor3, t.Font, t.TextSize, t.TextXAlignment = Color3.fromRGB(200, 200, 210), Enum.Font.Gotham, 12, Enum.TextXAlignment.Left
+		t.Parent = row
+		local box = Instance.new("TextBox")
+		box.Size, box.Position, box.Text = UDim2.fromOffset(70, 24), UDim2.new(1, -72, 0, 1), tostring(State.Config[key])
+		box.BackgroundColor3, box.TextColor3, box.ClearTextOnFocus = Color3.fromRGB(45, 45, 60), Color3.new(1, 1, 1), false
+		box.Parent = row; corner(box, 4)
+		box.FocusLost:Connect(function()
+			local n = tonumber(box.Text)
+			if n then State.Config[key] = clamp(n, lo, hi) end
+			box.Text = tostring(State.Config[key])
+		end)
 	end
-	flyBtn("▲", 0, "btnUp")
-	flyBtn("▼", 66, "btnDown")
-	State:Bind("*", function()
-		fly.Visible = State:Get("FlyAir") or State:Get("FlyDron") or State:Get("FlyDown")
-		if not fly.Visible then Move.btnUp, Move.btnDown = false, false end
+
+	local main_ = makePage("Main")
+	for _, f in ipairs({ "Tele Dron", "Hitbox All Mod", "Tele Kill", "Aimbot", "All Mod Im", "Model Độn Thổ",
+		"Model head down", "Player Barrier", "Long Legs" }) do addToggle(main_, f) end
+	addNumber(main_, "Khoảng cách an toàn Tele Dron", "SafeHeight", 2, 100)
+	addNumber(main_, "Cỡ Hitbox", "HitboxSize", 2, 80)
+	addNumber(main_, "Độ sâu Độn Thổ", "UndergroundDepth", 2, 300)
+	addNumber(main_, "Độ sâu Head Down", "HeadDepth", 0, 50)
+	addNumber(main_, "Chân dài thêm", "LongLegs", 1, 300)
+
+	local esp_ = makePage("Esp")
+	for _, f in ipairs({ "Esp Line", "Esp Box", "Esp Name", "Esp Distance", "Esp Hologram" }) do addToggle(esp_, f) end
+
+	local other_ = makePage("Khác")
+	for _, f in ipairs({ "Fly Down", "Fly Dron", "No Clip", "Fly Air", "Speed", "Jumping Air", "Night Vision", "Fix Lag" }) do
+		addToggle(other_, f)
+	end
+	addNumber(other_, "Fly Speed", "FlySpeed", 1, 500)
+	addNumber(other_, "Speed (WalkSpeed)", "WalkSpeed", 1, 500)
+	addNumber(other_, "Độ cao Fly Dron", "DroneHeight", 1, 200)
+	addNumber(other_, "Độ sâu Fly Down", "DownDepth", 1, 300)
+
+	switchTab("Main")
+
+	-- Cụm nút ▲▼ trên màn hình khi đang bay
+	local fly = Instance.new("Frame")
+	fly.Size, fly.Position, fly.BackgroundTransparency = UDim2.fromOffset(60, 130), UDim2.new(1, -80, 0.5, -65), 1
+	fly.Visible = false; fly.Parent = gui
+	local function holdBtn(text, y, flag)
+		local b = Instance.new("TextButton")
+		b.Size, b.Position, b.Text, b.TextSize = UDim2.fromOffset(56, 56), UDim2.fromOffset(2, y), text, 24
+		b.BackgroundColor3, b.TextColor3, b.BackgroundTransparency = Color3.fromRGB(30, 30, 40), Color3.new(1, 1, 1), 0.2
+		b.Parent = fly; corner(b, 10)
+		b.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then Input[flag] = true end
+		end)
+		b.InputEnded:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then Input[flag] = false end
+		end)
+	end
+	holdBtn("▲", 0, "up"); holdBtn("▼", 68, "down")
+	table.insert(State.OnChanged, function()
+		fly.Visible = State.Flags["Fly Air"] or State.Flags["Fly Dron"] or State.Flags["Fly Down"] or false
+		if not fly.Visible then Input.up, Input.down = false, false end
 	end)
 end
 
--- ===================== KHỞI TẠO =====================
-local root = Maid.new()
-
-local function shutdown()
-	local names = {}
-	for f in pairs(State.Flags) do names[#names + 1] = f end
-	for _, f in ipairs(names) do State:Set(f, false) end
-	Esp:Cleanup()
-	root:Clean()
-end
-
-Scanner:Init(root)
-Esp:Init(root)
-Combat:Init()
-World:Init(root)
-UI:Build(root, shutdown)
-
-print("[DebugPanel] Sẵn sàng. Phím E/Q hoặc nút ▲▼ để lên/xuống khi bay.")
+UI.Build()
