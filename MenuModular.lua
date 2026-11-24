@@ -37,7 +37,7 @@ local function clamp(v, a, b) return math.max(a, math.min(b, v)) end
 ---------------------------------------------------------------------
 local State = {
 	Config = {
-		ScanRange = 150, SafeHeight = 12, FlySpeed = 60, WalkSpeed = 16,
+		ScanRange = 150, SafeHeight = 12, FlySpeed = 60, VerticalSpeed = 60, WalkSpeed = 16,
 		DroneHeight = 6, DownDepth = 8, HitboxSize = 15, UndergroundDepth = 30,
 		HeadDepth = 6, LongLegs = 40, BarrierRadius = 12, BarrierHeight = 16, AimSmooth = 0.35,
 		AttackInterval = 0.15,
@@ -675,7 +675,8 @@ local function registerFly(name, mode)
 		end
 		hum.PlatformStand, hum.AutoRotate = true, false
 		local bv = j:Add(Instance.new("BodyVelocity"))
-		bv.MaxForce, bv.Velocity, bv.Parent = Vector3.one * 1e7, Vector3.zero, root
+		-- P cao => đổi vận tốc gần như tức thì, hết độ trễ khi bấm lên/xuống/thả nút
+		bv.MaxForce, bv.P, bv.Velocity, bv.Parent = Vector3.one * 1e7, 1e5, Vector3.zero, root
 		local bg = j:Add(Instance.new("BodyGyro"))
 		bg.MaxTorque, bg.P, bg.D, bg.Parent = Vector3.one * 1e7, 2e4, 1e3, root
 		local holdY = root.Position.Y -- chống tự lên/xuống khi không bấm
@@ -690,17 +691,26 @@ local function registerFly(name, mode)
 			local v = (Input.up and 1 or 0) - (Input.down and 1 or 0)
 			local vy = 0
 			if mode == "Air" then
-				vy = v * State.Config.FlySpeed
+				vy = v * State.Config.VerticalSpeed
 				bg.CFrame = base
 			elseif mode == "Dron" then
-				if v ~= 0 then State.Config.DroneHeight = clamp(State.Config.DroneHeight + v * dt * 6, 1, 200) end
 				gY = groundY(r.Position.X, r.Position.Z, r.Position.Y, c)
-				vy = clamp((gY + State.Config.DroneHeight - r.Position.Y) * 6, -40, 40)
+				if v ~= 0 then
+					-- đang bấm: đặt vận tốc trực tiếp, đồng bộ độ cao mục tiêu = độ cao hiện tại (không giật lại)
+					vy = v * State.Config.VerticalSpeed
+					State.Config.DroneHeight = clamp(r.Position.Y - gY, 1, 200)
+				else
+					vy = clamp((gY + State.Config.DroneHeight - r.Position.Y) * 12, -80, 80)
+				end
 				bg.CFrame = base * CFrame.Angles(-math.pi / 2, 0, 0) -- úp mặt xuống
 			else -- Down
-				if v ~= 0 then State.Config.DownDepth = clamp(State.Config.DownDepth - v * dt * 6, 1, 300) end
 				gY = groundY(r.Position.X, r.Position.Z, gY + 1, c)
-				vy = clamp((gY - State.Config.DownDepth - r.Position.Y) * 6, -40, 40)
+				if v ~= 0 then
+					vy = v * State.Config.VerticalSpeed
+					State.Config.DownDepth = clamp(gY - r.Position.Y, 1, 300)
+				else
+					vy = clamp((gY - State.Config.DownDepth - r.Position.Y) * 12, -80, 80)
+				end
 				bg.CFrame = base * CFrame.Angles(math.pi / 2, 0, 0) -- nằm ngửa
 			end
 			bv.Velocity = Vector3.new(move.X, vy, move.Z)
@@ -979,6 +989,7 @@ function UI.Build()
 		addToggle(other_, f)
 	end
 	addNumber(other_, "Fly Speed", "FlySpeed", 1, 500)
+	addNumber(other_, "Tốc độ lên/xuống", "VerticalSpeed", 1, 500)
 	addNumber(other_, "Speed (WalkSpeed)", "WalkSpeed", 1, 500)
 	addNumber(other_, "Độ cao Fly Dron", "DroneHeight", 1, 200)
 	addNumber(other_, "Độ sâu Fly Down", "DownDepth", 1, 300)
