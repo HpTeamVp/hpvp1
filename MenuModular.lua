@@ -98,7 +98,7 @@ local State = {
 -- Các tính năng trong cùng nhóm không chạy cùng lúc (tránh tranh chấp CFrame/Velocity)
 local GROUPS = {
 	{ "TeleDron", "TeleKill", "FlyAir", "FlyDron", "FlyDown" },
-	{ "AllModIm", "ModelDonTho", "ModelHeadDown" },
+	{ "AllModIm", "ModelDonTho", "ModelHeadDown", "ModBack" },
 }
 
 function State:Get(f) return self.Flags[f] == true end
@@ -252,6 +252,11 @@ Combat.RangedAimDownHook = function(e) end
 -- hum = Humanoid của bạn, mobs = danh sách mob gần (trong khoảng rào chắn + 15).
 -- Máu thật do server giữ; nếu game có Remote/Attribute khiên thì gọi ở đây.
 Combat.BlockDamageHook = function(hum, mobs) end
+
+-- >>> HOOK 'Mod Back': đòn đánh của mob đi theo hướng mob đang quay <<<
+-- e = { model, hum, root }, dir = hướng mob đang quay (Vector3 đơn vị, nằm ngang). Gọi mỗi 0.2s.
+-- Ví dụ: đặt Attribute/Value hướng bắn của mob = dir, hoặc gọi Remote của game để mob đánh theo dir.
+Combat.ModBackHook = function(e, dir) end
 
 function Combat:Attack(t, mode)
 	local now = os.clock()
@@ -568,6 +573,48 @@ function Combat:InitExtra()
 			m:Add(function() Morph:RestoreAll(kind) end)
 		end)
 	end
+
+	-- Mod Back: mob quay lưng về người chơi, tắt AutoRotate để không quay lại,
+	-- đòn đánh (xa/gần) đi theo hướng mob quay qua Combat.ModBackHook. Không dùng cùng chế độ neo mob.
+	feature("ModBack", function(m)
+		local snap = {}
+		local function restore(model)
+			local r = snap[model]
+			if not r then return end
+			snap[model] = nil
+			if r.hum.Parent then r.hum.AutoRotate = r.ar end
+		end
+		local acc = 0
+		m:Add(RunService.Heartbeat:Connect(function(dt)
+			local _, hrp = me()
+			if not hrp then return end
+			acc += dt
+			local callHook = acc >= 0.2
+			if callHook then acc = 0 end
+			local seen = {}
+			for _, e in ipairs(Scanner.List) do
+				local known = snap[e.model]
+				if e.dist <= State.Cfg.ModRange or (known and e.dist <= State.Cfg.ModRange + 20) then
+					seen[e.model] = true
+					if not known then snap[e.model] = { hum = e.hum, ar = e.hum.AutoRotate } end
+					e.hum.AutoRotate = false
+					local pos = e.root.Position
+					local away = Vector3.new(pos.X - hrp.Position.X, 0, pos.Z - hrp.Position.Z)
+					if away.Magnitude > 0.1 then
+						local dir = away.Unit
+						e.root.CFrame = CFrame.lookAt(pos, pos + dir) -- quay lưng, giữ nguyên vị trí
+						if callHook then pcall(Combat.ModBackHook, e, dir) end
+					end
+				end
+			end
+			for model in pairs(snap) do
+				if not seen[model] then restore(model) end -- mob chết/ra tầm -> trả AutoRotate
+			end
+		end))
+		m:Add(function()
+			for model in pairs(snap) do restore(model) end
+		end)
+	end)
 
 	-- Player Barrier: 6 tấm rào vô hình (rỗng bên trong) bám theo nhân vật
 	feature("PlayerBarrier", function(m)
@@ -1222,6 +1269,7 @@ local PAGES = {
 		{ "n", "Độ sâu độn thổ", "BurrowDepth" },
 		{ "t", "Model head down", "ModelHeadDown" },
 		{ "n", "Độ chôn đầu-vai", "HeadBury" },
+		{ "t", "Mod Back", "ModBack" },
 		{ "t", "Player Barrier", "PlayerBarrier" },
 		{ "n", "Barrier - Kích thước", "BarrierSize" },
 		{ "t", "Long Legs", "LongLegs" },
